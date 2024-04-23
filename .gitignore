@@ -1,3 +1,14 @@
+Train/
+Eval/
+Model/
+COCO/
+Ch64_SAMDataset/
+SAMDataset/
+Mapillary/
+MapillaryPanopticSet_256/
+
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
