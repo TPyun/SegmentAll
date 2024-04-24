@@ -11,6 +11,39 @@ from torchvision.models.segmentation import DeepLabV3_ResNet101_Weights
 from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models import resnet
 import timm
+from torchvision.models import VisionTransformer
+
+class CustomVisionTransformer(nn.Module):
+    def __init__(self):
+        super(CustomVisionTransformer, self).__init__()
+        # Initialize the VisionTransformer with the desired configuration
+        self.vit = VisionTransformer(
+            img_size=(160, 160),
+            patch_size=16,
+            num_layers=12,
+            num_heads=12,
+            hidden_dim=768,
+            mlp_dim=3072,
+            num_classes=1000  # This will be modified later
+        )
+        
+        # Replace the classifier head with a new layer to output the desired shape
+        self.transform_output = nn.Sequential(
+            nn.Linear(self.vit.head.in_features, 64 * 160 * 160),
+            nn.Unflatten(1, (64, 160, 160))
+        )
+        
+        # Remove the original classification head
+        self.vit.head = nn.Identity()
+    
+    def forward(self, x):
+        # Forward pass through the ViT base
+        x = self.vit(x)
+        
+        # Transform the output to the desired shape (64, 160, 160)
+        x = self.transform_output(x)
+        
+        return x
 
 class Translator(nn.Module):
     def __init__(self, channel):

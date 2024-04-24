@@ -519,7 +519,9 @@ class SAMDataset(Dataset):
 
         if 'train' in self.type:
             image, instance_seg = self.random_effect(image, instance_seg)
-            
+        
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
         image = self.normalize(image)
         
         return image, instance_seg

@@ -20,6 +20,11 @@ import Tele
 
 telegram = Tele.TeleSender()
 
+def loss_each_channel(pred, target):
+    bce_loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
+    mean_loss = bce_loss.mean(dim=1).mean()
+    return mean_loss
+
 def get_iou(pred, target):
     pred = pred > 0.5
     target = target > 0.5
@@ -125,7 +130,8 @@ def eval(model, eval_dataloader, device):
         
         seg_image = rearrange_target_image(result, seg_image)
         
-        loss = F.binary_cross_entropy(result, seg_image)
+        loss = loss_each_channel(result, seg_image)
+        # loss = F.binary_cross_entropy(result, seg_image)
         # result = ip.make_max_image(result, limit=0.5)
         result = result > 0.5
         
@@ -264,7 +270,7 @@ def main(rank, world_size):
     num_epochs = 100000
     # accumulation_steps = fake_batch_size // actual_batch_size
     print_every = 1
-    eval_every = 1
+    eval_every = 2
     
     t_loss_epoch = 0
     t_iou_epoch = 0
@@ -288,7 +294,8 @@ def main(rank, world_size):
             result = ddp_model(image)
             seg_image = rearrange_target_image(result, seg_image)
             
-            loss = F.binary_cross_entropy(result, seg_image)
+            loss = loss_each_channel(result, seg_image)
+            # loss = F.binary_cross_entropy(result, seg_image)
             loss.backward()
             
             # Gradient Accumulation
