@@ -219,7 +219,43 @@ class SimpleSegmentationModel(nn.Module):
         # plt.close()
         
         mask = x['0'] + x['1'] + x['2']
-        mask = torch.sigmoid(mask)
+        mask = torch.tanh(mask) / 2 + 0.5
+        return mask
+
+
+
+class SingleChannelSeg(nn.Module):
+    def __init__(self):
+        super(SingleChannelSeg, self).__init__()
+        
+        weights = DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1
+        deeplabv3 = deeplabv3_resnet50(weights=weights)
+        
+        self.encoder = deeplabv3.backbone
+        self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=False)
+        
+        in_channels = [256, 512, 2048]
+        self.fpn = FeaturePyramidNetwork(in_channels_list=in_channels, out_channels=1)
+        
+    def forward(self, x):
+        origin_size = x.shape[2:]
+        
+        x = self.encoder.conv1(x)
+        x = self.encoder.bn1(x)
+        x = self.encoder.relu(x)
+        
+        x_1 = self.encoder.layer1(x)
+        x_2 = self.encoder.layer2(x_1)
+        x_3 = self.encoder.layer3(x_2)
+        x_3 = self.encoder.layer4(x_3)
+        
+        x = self.fpn({'0': x_1, '1': x_2, '2': x_3})
+        
+        x['1'] = F.interpolate(x['1'], size=origin_size, mode="bilinear", align_corners=False)
+        x['2'] = F.interpolate(x['2'], size=origin_size, mode="bilinear", align_corners=False)
+        
+        mask = x['0'] + x['1'] + x['2']
+        mask = torch.tanh(mask) / 2 + 0.5
         return mask
 
     

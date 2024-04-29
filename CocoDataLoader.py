@@ -1,3 +1,4 @@
+from hmac import new
 import os
 import numpy as np
 import torch
@@ -16,6 +17,7 @@ from PIL import Image
 from torchvision.transforms.functional import resize
 import os.path as osp
 from PIL import ImageFilter
+import torch.nn.functional as F
 
 class SegDataset(torch.utils.data.Dataset):
     def __init__(self, path, width, height, mode='train'):
@@ -631,6 +633,7 @@ class MapillaryData(Dataset):
         ])
         
     def __len__(self):  
+        return 32
         return len(self.annotations)
     
     def __getitem__(self, idx):
@@ -646,11 +649,13 @@ class MapillaryData(Dataset):
         panoptic_path = self.root + f"{'training'}/{self.version}/panoptic/{file_name + '.png'}"
         panoptic_image = Image.open(panoptic_path)
         
-        if len(segments_info) > 63:
-            seg = torch.zeros(len(segments_info), self.width, self.height, dtype=torch.float32)
-        else:
-            seg = torch.zeros(64, self.width, self.height, dtype=torch.float32)
-                    
+        # if len(segments_info) > 63:
+        #     seg = torch.zeros(len(segments_info), self.width, self.height, dtype=torch.float32)
+        # else:
+        #     seg = torch.zeros(64, self.width, self.height, dtype=torch.float32)
+            
+        seg = torch.zeros(1, self.width, self.height, dtype=torch.float32)
+        
         transform = ToTensor()
         panoptic_image = transform(panoptic_image) * 255.0
         panoptic_image = panoptic_image.to(torch.int16)
@@ -658,14 +663,35 @@ class MapillaryData(Dataset):
         panoptic_image = resize(panoptic_image.unsqueeze(0), size=(self.height, self.width), interpolation=Image.NEAREST).squeeze(0)
 
         for i, seg_info in enumerate(segments_info):
-            seg[i] = panoptic_image == seg_info["id"]
+            # seg[i] = panoptic_image == seg_info["id"]
+            
+            mask = panoptic_image == seg_info["id"]
+            edges = cv2.Canny(mask.numpy().astype(np.uint8), 0, 1)
+            edges = torch.tensor(edges, dtype=torch.float32)
+            edges = edges.unsqueeze(0)
+            edges = torch.where(edges > 0.5, 1, 0)
+            seg = torch.where(edges == 1, 1, seg)
+            
+        # plt.clf()
+        # plt.figure(figsize=(12, 12))
+        # plt.imshow(seg.permute(1, 2, 0).numpy())
+        # plt.savefig('/home/wooyung/Develop/RadarDetection/seg.png', bbox_inches='tight')
+        # plt.close()
+            
         
-        seg = seg[seg.sum(dim=(1, 2)).argsort(descending=True)]
-        seg = seg[:64]
+        # seg = seg[seg.sum(dim=(1, 2)).argsort(descending=True)]
+        # seg = seg[:64]
         
-        image, seg = self.random_effect(image, seg)
+        # output_mask = torch.zeros(self.width, self.height, dtype=torch.float32)
+        # for i, s in enumerate(seg):
+        #     output_mask += (s * (i + 1)  * 10)
+        # output_mask = (output_mask - output_mask.min()) / (output_mask.max() - output_mask.min())
+            
+        # output_mask = output_mask.unsqueeze(0)
         
-        return image.cpu(), seg.cpu()
+        # image, seg = self.random_effect(image, seg)
+        
+        return image, seg
 
     def random_effect(self, image, instance_image):
         scale = random.uniform(1.0, 2.0)
@@ -700,7 +726,6 @@ class MapillaryData(Dataset):
 class PreProcessedMapillaryDataset(Dataset):
     def __init__(self, root, width, height, type='train'):
         self.root = root
-        # self.devices = [torch.device('cuda:0'), torch.device('cuda:1')]
         self.width = width
         self.height = height
         self.resize = Resize((self.width, self.height), interpolation=Image.NEAREST)
