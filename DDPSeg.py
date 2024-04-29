@@ -1,3 +1,4 @@
+from cv2 import mean
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -12,7 +13,6 @@ import torch.nn.functional as F
 from pycocotools import cocoeval
 import numpy as np
 import sys
-from scipy.optimize import linear_sum_assignment
 import ImageProcess as ip
 import Model as md
 import CocoDataLoader as ccdl
@@ -20,10 +20,54 @@ import Tele
 
 telegram = Tele.TeleSender()
 
-def loss_each_channel(pred, target):
-    bce_loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
-    mean_loss = bce_loss.mean(dim=1).mean()
+def loss_each_channel(pred, target, loss_func='bce'):
+    pred_mask_sum = pred.sum(dim=(2, 3)) + 1
+    # target_mask_sum = target.sum(dim=(2, 3)) + 1
+    # mean_mask_sum = (pred_mask_sum + target_mask_sum) / 2
+    offset = target.size(2) * target.size(3) / pred_mask_sum
+    
+    if loss_func == 'smooth':
+        loss = F.smooth_l1_loss(pred, target, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'mse':
+        loss = F.mse_loss(pred, target, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'bce':
+        loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'iou':
+        smooth = 1e-6
+        intersection = (pred * target).float().sum(dim=(2, 3))
+        union = (pred + target).float().sum(dim=(2, 3))
+        iou = intersection / (union + smooth)
+        iou_loss = 1 - iou
+            
+        loss = loss * offset * iou_loss
+    
+    mean_loss = loss.mean()
     return mean_loss
+
+def channel_sum_loss(pred, loss_func='smooth'):
+    channel_sums = pred.sum(dim=1)  # 채널 방향으로 합산
+    channel_sums = channel_sums.unsqueeze(1)
+    target_sums = torch.ones_like(channel_sums)
+    
+    if loss_func == 'smooth':
+        loss = F.smooth_l1_loss(channel_sums, target_sums, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'mse':
+        loss = F.mse_loss(channel_sums, target_sums, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'iou':
+        smooth = 1e-6
+        intersection = (channel_sums * target_sums).float().sum(dim=(2, 3))
+        union = (channel_sums + target_sums).float().sum(dim=(2, 3))
+        iou = intersection / (union + smooth)
+        loss = 1 - iou
+        
+    mean_loss = loss.mean(dim=1).mean()
+    return mean_loss
+
+def get_loss(pred, target, loss_func='smooth'):
+    mask_loss = loss_each_channel(pred, target, loss_func)
+    # sum_loss = channel_sum_loss(pred, loss_func)
+    # loss = mask_loss + sum_loss
+    return mask_loss
 
 def get_iou(pred, target):
     pred = pred > 0.5
@@ -78,6 +122,8 @@ def get_matching_channel_list(pred, target, loss_func='smooth'):
         loss_fn = F.smooth_l1_loss
     elif loss_func == 'mse':
         loss_fn = F.mse_loss
+    elif loss_func == 'bce':
+        loss_fn = F.binary_cross_entropy
 
     loss_list = []
     # 손실 계산 최적화
@@ -130,9 +176,7 @@ def eval(model, eval_dataloader, device):
         
         seg_image = rearrange_target_image(result, seg_image)
         
-        loss = loss_each_channel(result, seg_image)
-        # loss = F.binary_cross_entropy(result, seg_image)
-        # result = ip.make_max_image(result, limit=0.5)
+        loss = get_loss(result, seg_image)
         result = result > 0.5
         
         iou, except_error_iou = get_iou(result, seg_image)
@@ -242,8 +286,8 @@ def main(rank, world_size):
     # root = f'{directory}/COCO'
     # train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
     
-    root = f'{directory}/SAMDataset'
-    train_dataset = ccdl.SAMDataset(root, 'train', width, height)
+    # root = f'{directory}/SAMDataset'
+    # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
     
     # root = '/home/wooyung/Develop/RadarDetection/20240404/'
     # train_dataset = ccdl.SegDataset(root, width, height)
@@ -251,26 +295,25 @@ def main(rank, world_size):
     # root = '/home/wooyung/Develop/RadarDetection/CocoSeg/Mapillary/'
     # train_dataset = ccdl.MapillaryData(root, width, height)
     
-    # root = '/home/wooyung/Develop/RadarDetection/CocoSeg/MapillaryPanopticSet_256/'
-    # train_dataset = ccdl.PreProcessedMapillaryDataset(root, type='train')
+    root = '/home/wooyung/Develop/RadarDetection/SegmentAll/MapillaryPanopticSet_256/'
+    train_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='train')
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
-    
     if rank == 0:
         # eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
-        # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, type='eval')
+        eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         # eval_dataset = ccdl.SegDataset(root, width, height, mode='eval')
-        eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
+        # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
         eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=4, shuffle=True)
         
     
     num_epochs = 100000
     # accumulation_steps = fake_batch_size // actual_batch_size
     print_every = 1
-    eval_every = 2
+    eval_every = 4
     
     t_loss_epoch = 0
     t_iou_epoch = 0
@@ -286,7 +329,6 @@ def main(rank, world_size):
         epoch_start_time = time.time()
         
         for batch_i, batch in enumerate(train_dataloader):
-            
             image = batch[0].to(device)
             seg_image = batch[1].to(device)
 
@@ -294,8 +336,7 @@ def main(rank, world_size):
             result = ddp_model(image)
             seg_image = rearrange_target_image(result, seg_image)
             
-            loss = loss_each_channel(result, seg_image)
-            # loss = F.binary_cross_entropy(result, seg_image)
+            loss = get_loss(result, seg_image)
             loss.backward()
             
             # Gradient Accumulation

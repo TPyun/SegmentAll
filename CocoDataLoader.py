@@ -374,6 +374,9 @@ class PanopticCocoDataset(Dataset):
         self.width = width
         self.height = height
         
+        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+        
         # JSON 파일 로드
         with open(self.annotation_file, 'r') as f:
             self.panoptic_data = json.load(f)
@@ -397,7 +400,6 @@ class PanopticCocoDataset(Dataset):
             image = image.unsqueeze(2).expand(-1, -1, 3)
         image = image.permute(2, 0, 1)
         image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
-        image = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.225, 0.225, 0.225])(image)
         
         
         # 예제로 첫 번째 이미지 정보를 사용
@@ -437,8 +439,12 @@ class PanopticCocoDataset(Dataset):
         instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
         instance_seg = instance_seg[:64]
             
-        # if 'train' in self.dataType:
-        #     image, instance_seg = self.random_effect(image, instance_seg)
+        if 'train' in self.dataType:
+            image, instance_seg = self.random_effect(image, instance_seg)
+            
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
+        image = self.normalize(image)
     
         return image, instance_seg
     
@@ -447,11 +453,15 @@ class PanopticCocoDataset(Dataset):
         #     return 16000
         # elif 'val' in self.dataType:
         #     return 1024
+        return 64
             
         return self.length // 16 * 16
 
     
     def random_effect(self, image, instance_image):
+        color_jitter = transforms.ColorJitter(brightness=(0.5, 1.5),contrast=(0.5, 1.5),saturation=(0.5, 1.5))
+        image = color_jitter(image)
+        
         scale = random.uniform(1.0, 1.2)
         width = int(self.width * scale)
         height = int(self.width * scale)
@@ -463,10 +473,19 @@ class PanopticCocoDataset(Dataset):
         image = image[:, x:x+self.width, y:y+self.height]
         instance_image = instance_image[:, x:x+self.width, y:y+self.height]
         
-        if random.randint(0, 1) == 0:
+        flip_seed = random.randint(0, 3)
+        if flip_seed == 0:
             return [image, instance_image]
-        image = torch.flip(image, [2])
-        instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 2:
+            image = torch.flip(image, [1])
+            instance_image = torch.flip(instance_image, [1])
+        else:
+            image = torch.flip(image, [1, 2])
+            instance_image = torch.flip(instance_image, [1, 2])
+        
         return image, instance_image
 
 
@@ -612,8 +631,7 @@ class MapillaryData(Dataset):
         ])
         
     def __len__(self):  
-        return 64
-        return len(self.annotations)#  // 16 * 16
+        return len(self.annotations)
     
     def __getitem__(self, idx):
         annotation = self.annotations[idx]
@@ -680,9 +698,13 @@ class MapillaryData(Dataset):
     
     
 class PreProcessedMapillaryDataset(Dataset):
-    def __init__(self, root, type='train'):
+    def __init__(self, root, width, height, type='train'):
         self.root = root
         # self.devices = [torch.device('cuda:0'), torch.device('cuda:1')]
+        self.width = width
+        self.height = height
+        self.resize = Resize((self.width, self.height), interpolation=Image.NEAREST)
+        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         
         self.type = type
         self.data = []
@@ -704,8 +726,17 @@ class PreProcessedMapillaryDataset(Dataset):
     
     def __getitem__(self, idx):
         image, seg = torch.load(os.path.join(self.root, self.data[idx]))
+        
+        image = self.resize(image)
+        seg = self.resize(seg)
+        
         if self.type == 'train':
             image, seg = self.random_effect(image, seg)
+            
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
+        image = self.normalize(image)
+        
         return image, seg
 
     def random_effect(self, image, instance_image):
@@ -723,9 +754,17 @@ class PreProcessedMapillaryDataset(Dataset):
         image = image[:, x:x+origin_width, y:y+origin_height]
         instance_image = instance_image[:, x:x+origin_width, y:y+origin_height]
         
-        if random.randint(0, 1) == 0:
+        flip_seed = random.randint(0, 3)
+        if flip_seed == 0:
             return [image, instance_image]
-        image = torch.flip(image, [2])
-        instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 2:
+            image = torch.flip(image, [1])
+            instance_image = torch.flip(instance_image, [1])
+        else:
+            image = torch.flip(image, [1, 2])
+            instance_image = torch.flip(instance_image, [1, 2])
         
         return image, instance_image

@@ -12,37 +12,45 @@ from torchvision.models._utils import IntermediateLayerGetter
 from torchvision.models import resnet
 import timm
 from torchvision.models import VisionTransformer
-
+    
+    
 class CustomVisionTransformer(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes=64, image_size=160):
         super(CustomVisionTransformer, self).__init__()
-        # Initialize the VisionTransformer with the desired configuration
+        self.image_size = image_size
+        self.num_classes = num_classes
+        
         self.vit = VisionTransformer(
-            img_size=(160, 160),
+            image_size=self.image_size,
             patch_size=16,
-            num_layers=12,
-            num_heads=12,
-            hidden_dim=768,
-            mlp_dim=3072,
-            num_classes=1000  # This will be modified later
+            num_layers=8,
+            num_heads=8,
+            hidden_dim=2048,
+            mlp_dim=4096,
+            num_classes=1  # This will be modified later
         )
         
-        # Replace the classifier head with a new layer to output the desired shape
+        print(self.vit)
         self.transform_output = nn.Sequential(
-            nn.Linear(self.vit.head.in_features, 64 * 160 * 160),
-            nn.Unflatten(1, (64, 160, 160))
+            nn.Linear(self.vit.heads.head.in_features, self.num_classes * self.image_size//8 * self.image_size//8),
+            nn.Unflatten(1, (self.num_classes, self.image_size//8, self.image_size//8)),
+        )
+        self.vit.heads = nn.Identity()
+        
+        self.decoder = nn.Sequential(
+            nn.Upsample(size=(self.image_size, self.image_size), mode='bilinear', align_corners=False),
         )
         
-        # Remove the original classification head
-        self.vit.head = nn.Identity()
+        self.sigmoid = nn.Sigmoid()
     
     def forward(self, x):
-        # Forward pass through the ViT base
         x = self.vit(x)
-        
-        # Transform the output to the desired shape (64, 160, 160)
+        # print(f"vit: {x.shape}")
         x = self.transform_output(x)
-        
+        # print(f"transform_output: {x.shape}")
+        x = self.decoder(x)
+        # print(f"decoder: {x.shape}")
+        x = self.sigmoid(x)
         return x
 
 class Translator(nn.Module):
@@ -154,6 +162,7 @@ import matplotlib.pyplot as plt
 class SimpleSegmentationModel(nn.Module):
     def __init__(self, num_classes=64):
         super(SimpleSegmentationModel, self).__init__()
+        
         weights = DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1
         deeplabv3 = deeplabv3_resnet50(weights=weights)
         
@@ -162,7 +171,7 @@ class SimpleSegmentationModel(nn.Module):
         
         in_channels = [256, 512, 2048]
         self.fpn = FeaturePyramidNetwork(in_channels_list=in_channels, out_channels=num_classes)
-
+        
     def forward(self, x):
         origin_size = x.shape[2:]
         
@@ -209,10 +218,9 @@ class SimpleSegmentationModel(nn.Module):
         # plt.savefig("fpn_2.png")
         # plt.close()
         
-        x = x['0'] + x['1'] + x['2']
-        
-        x = torch.sigmoid(x)
-        return x
+        mask = x['0'] + x['1'] + x['2']
+        mask = torch.sigmoid(mask)
+        return mask
 
     
 class CustomSwinTransformer(nn.Module):
