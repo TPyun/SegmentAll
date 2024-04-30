@@ -419,30 +419,37 @@ class PanopticCocoDataset(Dataset):
                     panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
                     panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
         
-        if len(image_info['segments_info']) > 63:
-            instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
-        else:
-            instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
+        # if len(image_info['segments_info']) > 63:
+        #     instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
+        # else:
+        #     instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
+        instance_seg = torch.zeros((1, self.width, self.height), dtype=torch.float32)
 
         # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
         for i, segment_info in enumerate(image_info['segments_info']):
             segment_id = segment_info['id']
             category_id = segment_info['category_id']
             
+            # segment_mask = panoptic_id == segment_id
+            # segment_mask = segment_mask.astype(np.float32)
+            # mask = torch.tensor(segment_mask, dtype=torch.float32)
+            # mask = mask.unsqueeze(0)
+            # mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            # instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
+            
             segment_mask = panoptic_id == segment_id
-            segment_mask = segment_mask.astype(np.float32)
-
-            mask = torch.tensor(segment_mask, dtype=torch.float32)
-            mask = mask.unsqueeze(0)
-            mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            edges = cv2.Canny(segment_mask.astype(np.uint8), 0, 1)
+            edges = torch.tensor(edges, dtype=torch.float32)
+            edges = edges.unsqueeze(0)
+            edges = F.interpolate(edges.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            edges = torch.where(edges > 0.5, 1, 0)
+            instance_seg = torch.where(edges == 1, 1, instance_seg)
             
-            instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
+        # instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
+        # instance_seg = instance_seg[:64]
             
-        instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
-        instance_seg = instance_seg[:64]
-            
-        if 'train' in self.dataType:
-            image, instance_seg = self.random_effect(image, instance_seg)
+        # if 'train' in self.dataType:
+        #     image, instance_seg = self.random_effect(image, instance_seg)
             
         image_mean_brightness = image.mean()
         image = image - image_mean_brightness + 0.5
@@ -455,9 +462,7 @@ class PanopticCocoDataset(Dataset):
         #     return 16000
         # elif 'val' in self.dataType:
         #     return 1024
-        return 64
-            
-        return self.length // 16 * 16
+        return self.length // 4 * 4
 
     
     def random_effect(self, image, instance_image):
