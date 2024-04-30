@@ -13,6 +13,8 @@ import torch.nn.functional as F
 from pycocotools import cocoeval
 import numpy as np
 import sys
+import cv2
+
 import ImageProcess as ip
 import Model as md
 import CocoDataLoader as ccdl
@@ -109,8 +111,8 @@ script_path = os.path.abspath(__file__)
 directory = os.path.dirname(script_path)
 os.chdir(directory)
 
-width = 360
-height = 360
+width = 420
+height = 420
 actual_batch_size = 1
 train_plot_points = []
 eval_plot_points = []
@@ -146,7 +148,7 @@ def main(rank, world_size):
     # scheduler = ReduceLROnPlateau(optimizer, 'max', factor=0.8, patience=8, min_lr=0.0000001)
 
     root = f'{directory}/COCO'
-    train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
+    train_dataset = ccdl.BorderPanopticCocoDataset(root, 'train2017', width, height)
     
     # root = f'{directory}/SAMDataset'
     # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
@@ -158,14 +160,14 @@ def main(rank, world_size):
     # train_dataset = ccdl.MapillaryData(root, width, height)
     
     # root = '/home/wooyung/Develop/RadarDetection/SegmentAll/MapillaryPanopticSet_256/'
-    # train_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='train')
+    # train_dataset = ccdl.BorderPreProcessedMapillaryDataset(root, width, height, type='train')
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
     if rank == 0:
-        eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
-        # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
+        eval_dataset = ccdl.BorderPanopticCocoDataset(root, 'val2017', width, height)
+        # eval_dataset = ccdl.BorderPreProcessedMapillaryDataset(root, width, height, type='eval')
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         # eval_dataset = ccdl.SegDataset(root, width, height, mode='eval')
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
@@ -263,6 +265,29 @@ def main(rank, world_size):
                 plt.savefig(f'{directory}/Train/loss.png', bbox_inches='tight', pad_inches=0)
                 plt.close()
                 
+                line_image = result > 0.5
+                line_image = line_image[0][0].cpu().numpy()
+                line_image = line_image.astype(np.uint8)
+                line_image = line_image * 255
+                line_image = cv2.bitwise_not(line_image)
+                
+                num_labels, labels_im = cv2.connectedComponents(line_image)
+                # 각 레이블에 대해 이미지 생성
+                channels = []
+                for label in range(1, num_labels):  # 배경(레이블 0)은 무시
+                    mask = labels_im == label
+                    channel = np.zeros_like(line_image)
+                    channel[mask] = 255  # 도형을 255로 표시하여 명확하게 보이게 함
+                    channels.append(channel)
+                # 결과 확인
+                plt.clf()
+                plt.figure(figsize=(12, 12))
+                for idx, channel in enumerate(channels):
+                    plt.subplot(5, len(channels) // 5 + 1, idx + 1)
+                    plt.axis('off')
+                    plt.imshow(channel)
+                plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)                    
+                
                 torch.save(model.state_dict(), f'{directory}/Model/translator_{model_name}.pth')
 
         if (epoch + 1) % eval_every == 0:
@@ -276,7 +301,7 @@ def run(demo_fn, world_size):
     
 if __name__ == "__main__":
     os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"]= "0,1,5,6"
+    os.environ["CUDA_VISIBLE_DEVICES"]= "0,1"
     n_gpus = torch.cuda.device_count()
     # assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
     world_size = n_gpus

@@ -419,37 +419,28 @@ class PanopticCocoDataset(Dataset):
                     panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
                     panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
         
-        # if len(image_info['segments_info']) > 63:
-        #     instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
-        # else:
-        #     instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
-        instance_seg = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+        if len(image_info['segments_info']) > 63:
+            instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
+        else:
+            instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
 
         # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
         for i, segment_info in enumerate(image_info['segments_info']):
             segment_id = segment_info['id']
             category_id = segment_info['category_id']
             
-            # segment_mask = panoptic_id == segment_id
-            # segment_mask = segment_mask.astype(np.float32)
-            # mask = torch.tensor(segment_mask, dtype=torch.float32)
-            # mask = mask.unsqueeze(0)
-            # mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
-            # instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
-            
             segment_mask = panoptic_id == segment_id
-            edges = cv2.Canny(segment_mask.astype(np.uint8), 0, 1)
-            edges = torch.tensor(edges, dtype=torch.float32)
-            edges = edges.unsqueeze(0)
-            edges = F.interpolate(edges.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
-            edges = torch.where(edges > 0.5, 1, 0)
-            instance_seg = torch.where(edges == 1, 1, instance_seg)
+            segment_mask = segment_mask.astype(np.float32)
+            mask = torch.tensor(segment_mask, dtype=torch.float32)
+            mask = mask.unsqueeze(0)
+            mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
+
+        instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
+        instance_seg = instance_seg[:64]
             
-        # instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
-        # instance_seg = instance_seg[:64]
-            
-        # if 'train' in self.dataType:
-        #     image, instance_seg = self.random_effect(image, instance_seg)
+        if 'train' in self.dataType:
+            image, instance_seg = self.random_effect(image, instance_seg)
             
         image_mean_brightness = image.mean()
         image = image - image_mean_brightness + 0.5
@@ -768,6 +759,215 @@ class PreProcessedMapillaryDataset(Dataset):
         image = self.normalize(image)
         
         return image, seg
+
+    def random_effect(self, image, instance_image):
+        origin_width = image.shape[1]
+        origin_height = image.shape[2]
+        
+        scale = random.uniform(1.0, 1.2)
+        width = int(origin_width * scale)
+        height = int(origin_height * scale)
+
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='nearest').squeeze(0)
+        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='nearest').squeeze(0)
+        x = random.randint(0, width - origin_width)
+        y = random.randint(0, height - origin_height)
+        image = image[:, x:x+origin_width, y:y+origin_height]
+        instance_image = instance_image[:, x:x+origin_width, y:y+origin_height]
+        
+        flip_seed = random.randint(0, 3)
+        if flip_seed == 0:
+            return [image, instance_image]
+        elif flip_seed == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 2:
+            image = torch.flip(image, [1])
+            instance_image = torch.flip(instance_image, [1])
+        else:
+            image = torch.flip(image, [1, 2])
+            instance_image = torch.flip(instance_image, [1, 2])
+        
+        return image, instance_image
+    
+    
+
+class BorderPanopticCocoDataset(Dataset):
+    def __init__(self, root, dataType, width, height):
+        self.root = root
+        self.dataType = dataType
+        self.image_folder = '{}/{}'.format(self.root, dataType)
+        self.annotation_file = '{}/panoptic_annotations/panoptic_{}.json'.format(self.root, dataType)
+        self.panoptic_image_folder = '{}/panoptic_annotations/panoptic_{}/'.format(self.root, dataType)
+        self.image_list = os.listdir(self.image_folder)
+        self.image_list.sort()
+        
+        self.width = width
+        self.height = height
+        
+        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+        
+        # JSON 파일 로드
+        with open(self.annotation_file, 'r') as f:
+            self.panoptic_data = json.load(f)
+
+        # 총 개수 확인
+        print(f"Number of annotations: {len(self.panoptic_data['annotations'])}")
+
+        if len(os.listdir(self.image_folder)) == len(self.panoptic_data['annotations']):
+            self.length = len(self.panoptic_data['annotations'])
+            print(f"Number of images: {self.length}")
+        else:
+            print("ERROR: Number of images and annotations are not matched!!!")
+        
+        
+    def __getitem__(self, index):
+        # 폴더 안에 이미지 index번째 이미지 정보를 가져옴
+        image = io.imread(os.path.join(self.image_folder, self.image_list[index]))
+        image = torch.tensor(image, dtype=torch.float32)
+        image = image / 255.0
+        if len(image.shape) == 2:
+            image = image.unsqueeze(2).expand(-1, -1, 3)
+        image = image.permute(2, 0, 1)
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+        
+        # 예제로 첫 번째 이미지 정보를 사용
+        image_info = self.panoptic_data['annotations'][index]
+        image_id = image_info['image_id']
+        file_name = image_info['file_name']
+
+        # Panoptic 이미지 로드
+        panoptic_image_path = self.panoptic_image_folder + file_name
+        panoptic_img = cv2.imread(panoptic_image_path, cv2.IMREAD_COLOR)
+        panoptic_img = cv2.cvtColor(panoptic_img, cv2.COLOR_BGR2RGB)
+
+        # 고유 ID를 계산하기 위해 R, G, B 채널 사용
+        panoptic_id = panoptic_img[:, :, 0].astype(np.uint32) + \
+                    panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
+                    panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
+
+        instance_seg = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+
+        # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
+        for i, segment_info in enumerate(image_info['segments_info']):
+            segment_id = segment_info['id']
+            category_id = segment_info['category_id']
+            
+            segment_mask = torch.tensor(panoptic_id == segment_id, dtype=torch.float32)
+            print(segment_mask.shape)
+            segment_mask = F.interpolate(segment_mask.unsqueeze(0).unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0).squeeze(0)
+            segment_mask = torch.where(segment_mask > 0.5, 1, 0)
+            segment_mask = segment_mask.numpy() 
+            
+            edges = cv2.Canny(segment_mask.astype(np.uint8), 0, 1)
+            kernel = np.ones((3, 3), np.uint8)
+            edges = cv2.dilate(edges, kernel, iterations=1)
+            
+            edges = torch.tensor(edges, dtype=torch.float32)
+            edges = torch.where(edges > 0.5, 1, 0)
+            instance_seg = torch.where(edges == 1, 1, instance_seg)
+
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
+        image = self.normalize(image)
+    
+        return image, instance_seg
+    
+    def __len__(self):
+        # if 'train' in self.dataType:
+        #     return 16000
+        # elif 'val' in self.dataType:
+        #     return 1024
+        return 64
+        return self.length // 4 * 4
+
+    
+    def random_effect(self, image, instance_image):
+        color_jitter = transforms.ColorJitter(brightness=(0.5, 1.5),contrast=(0.5, 1.5),saturation=(0.5, 1.5))
+        image = color_jitter(image)
+        
+        scale = random.uniform(1.0, 1.2)
+        width = int(self.width * scale)
+        height = int(self.width * scale)
+
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        x = random.randint(0, width - self.width)
+        y = random.randint(0, height - self.height)
+        image = image[:, x:x+self.width, y:y+self.height]
+        instance_image = instance_image[:, x:x+self.width, y:y+self.height]
+        
+        flip_seed = random.randint(0, 3)
+        if flip_seed == 0:
+            return [image, instance_image]
+        elif flip_seed == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 2:
+            image = torch.flip(image, [1])
+            instance_image = torch.flip(instance_image, [1])
+        else:
+            image = torch.flip(image, [1, 2])
+            instance_image = torch.flip(instance_image, [1, 2])
+        
+        return image, instance_image
+
+
+class BorderPreProcessedMapillaryDataset(Dataset):
+    def __init__(self, root, width, height, type='train'):
+        self.root = root
+        self.width = width
+        self.height = height
+        self.resize = Resize((self.width, self.height), interpolation=Image.NEAREST)
+        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+        self.type = type
+        self.data = []
+        for f in os.listdir(self.root):
+            if f.endswith('.pt'):
+                self.data.append(f)
+                
+        self.data.sort()
+                
+        if self.type == 'train':
+            self.data = self.data[:int(len(self.data) * 0.9)]
+        elif self.type == 'eval':
+            self.data = self.data[int(len(self.data) * 0.9):]
+            
+        print(f"{type} Number of images: {len(self.data)}")
+        
+    def __len__(self):
+        return 32
+        return len(self.data)
+    
+    def __getitem__(self, idx):
+        image, seg = torch.load(os.path.join(self.root, self.data[idx]))
+        
+        image = self.resize(image)
+        seg = self.resize(seg)
+        
+        border_image = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+        
+        for i in range(1, 64):
+            edges = cv2.Canny(seg[i].numpy().astype(np.uint8), 0, 1)
+            kernel = np.ones((3, 3), np.uint8)  # 3x3 크기의 사각형 커널
+            edges = cv2.dilate(edges, kernel, iterations=1)
+            
+            edges = torch.tensor(edges, dtype=torch.float32)
+            edges = edges.unsqueeze(0)
+            edges = F.interpolate(edges.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            edges = torch.where(edges > 0.5, 1, 0)
+            border_image = torch.where(edges == 1, 1, border_image)
+        
+        # if self.type == 'train':
+        #     image, seg = self.random_effect(image, seg)
+            
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
+        image = self.normalize(image)
+        
+        return image, border_image
 
     def random_effect(self, image, instance_image):
         origin_width = image.shape[1]

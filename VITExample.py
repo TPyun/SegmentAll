@@ -60,6 +60,7 @@
 
 import cv2
 import numpy as np
+import matplotlib.pyplot as plt
 
 # 이미지 로드
 image = cv2.imread('/home/wooyung/Develop/RadarDetection/SegmentAll/COCO/panoptic_annotations/panoptic_val2017/000000000139.png', cv2.IMREAD_GRAYSCALE)
@@ -69,6 +70,8 @@ image[100, :] = 0
 image[:, 100] = 0
 
 # 도형 구분 (경계선 제거 후 각 연결된 컴포넌트를 독립적인 도형으로 인식)
+# image의 타입 확인
+
 num_labels, labels_im = cv2.connectedComponents(image)
 
 # 각 레이블에 대해 이미지 생성
@@ -79,8 +82,14 @@ for label in range(1, num_labels):  # 배경(레이블 0)은 무시
     channel[mask] = 255  # 도형을 255로 표시하여 명확하게 보이게 함
     channels.append(channel)
 
+directory = '/home/wooyung/Develop/RadarDetection/SegmentAll/'
 # 결과 확인
+# 결과 확인
+plt.clf()
+plt.figure(figsize=(12, 12))
 for idx, channel in enumerate(channels):
-    cv2.imshow(f'Channel {idx+1}', channel)
-    cv2.waitKey(0)
-cv2.destroyAllWindows()
+    plt.subplot(1, len(channels), idx + 1)
+    plt.axis('off')
+    plt.imshow(channel)
+plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)                    
+

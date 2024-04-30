@@ -246,9 +246,9 @@ script_path = os.path.abspath(__file__)
 directory = os.path.dirname(script_path)
 os.chdir(directory)
 
-width = 160
-height = 160
-actual_batch_size = 4
+width = 256
+height = 256
+actual_batch_size = 2
 fake_batch_size = 64
 train_plot_points = []
 eval_plot_points = []
@@ -307,7 +307,7 @@ def main(rank, world_size):
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         # eval_dataset = ccdl.SegDataset(root, width, height, mode='eval')
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
-        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=4, shuffle=True)
+        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=2, shuffle=True)
         
     
     num_epochs = 100000
