@@ -855,18 +855,20 @@ class BorderPanopticCocoDataset(Dataset):
             category_id = segment_info['category_id']
             
             segment_mask = torch.tensor(panoptic_id == segment_id, dtype=torch.float32)
-            print(segment_mask.shape)
             segment_mask = F.interpolate(segment_mask.unsqueeze(0).unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0).squeeze(0)
             segment_mask = torch.where(segment_mask > 0.5, 1, 0)
             segment_mask = segment_mask.numpy() 
             
             edges = cv2.Canny(segment_mask.astype(np.uint8), 0, 1)
-            kernel = np.ones((3, 3), np.uint8)
+            kernel = np.ones((4, 4), np.uint8)
             edges = cv2.dilate(edges, kernel, iterations=1)
             
             edges = torch.tensor(edges, dtype=torch.float32)
             edges = torch.where(edges > 0.5, 1, 0)
             instance_seg = torch.where(edges == 1, 1, instance_seg)
+            
+        # 반전
+        instance_seg = (instance_seg == 0).float()
 
         image_mean_brightness = image.mean()
         image = image - image_mean_brightness + 0.5
@@ -876,10 +878,9 @@ class BorderPanopticCocoDataset(Dataset):
     
     def __len__(self):
         # if 'train' in self.dataType:
-        #     return 16000
+        #     return 8192
         # elif 'val' in self.dataType:
         #     return 1024
-        return 64
         return self.length // 4 * 4
 
     
@@ -887,7 +888,7 @@ class BorderPanopticCocoDataset(Dataset):
         color_jitter = transforms.ColorJitter(brightness=(0.5, 1.5),contrast=(0.5, 1.5),saturation=(0.5, 1.5))
         image = color_jitter(image)
         
-        scale = random.uniform(1.0, 1.2)
+        scale = random.uniform(1.0, 1.5)
         width = int(self.width * scale)
         height = int(self.width * scale)
 
@@ -983,6 +984,140 @@ class BorderPreProcessedMapillaryDataset(Dataset):
         y = random.randint(0, height - origin_height)
         image = image[:, x:x+origin_width, y:y+origin_height]
         instance_image = instance_image[:, x:x+origin_width, y:y+origin_height]
+        
+        flip_seed = random.randint(0, 3)
+        if flip_seed == 0:
+            return [image, instance_image]
+        elif flip_seed == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        elif flip_seed == 2:
+            image = torch.flip(image, [1])
+            instance_image = torch.flip(instance_image, [1])
+        else:
+            image = torch.flip(image, [1, 2])
+            instance_image = torch.flip(instance_image, [1, 2])
+        
+        return image, instance_image
+    
+    
+    
+    
+class OneMaskPanopticCocoDataset(Dataset):
+    def __init__(self, root, dataType, width, height):
+        self.root = root
+        self.dataType = dataType
+        self.image_folder = '{}/{}'.format(self.root, dataType)
+        self.annotation_file = '{}/panoptic_annotations/panoptic_{}.json'.format(self.root, dataType)
+        self.panoptic_image_folder = '{}/panoptic_annotations/panoptic_{}/'.format(self.root, dataType)
+        self.image_list = os.listdir(self.image_folder)
+        self.image_list.sort()
+        
+        self.width = width
+        self.height = height
+        
+        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        
+        
+        # JSON 파일 로드
+        with open(self.annotation_file, 'r') as f:
+            self.panoptic_data = json.load(f)
+
+        # 총 개수 확인
+        print(f"Number of annotations: {len(self.panoptic_data['annotations'])}")
+
+        if len(os.listdir(self.image_folder)) == len(self.panoptic_data['annotations']):
+            self.length = len(self.panoptic_data['annotations'])
+            print(f"Number of images: {self.length}")
+        else:
+            print("ERROR: Number of images and annotations are not matched!!!")
+        
+        
+    def __getitem__(self, index):
+        # 폴더 안에 이미지 index번째 이미지 정보를 가져옴
+        image = io.imread(os.path.join(self.image_folder, self.image_list[index]))
+        image = torch.tensor(image, dtype=torch.float32)
+        image = image / 255.0
+        if len(image.shape) == 2:
+            image = image.unsqueeze(2).expand(-1, -1, 3)
+        image = image.permute(2, 0, 1)
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+        
+        # 예제로 첫 번째 이미지 정보를 사용
+        image_info = self.panoptic_data['annotations'][index]
+        image_id = image_info['image_id']
+        file_name = image_info['file_name']
+
+        # Panoptic 이미지 로드
+        panoptic_image_path = self.panoptic_image_folder + file_name
+        panoptic_img = cv2.imread(panoptic_image_path, cv2.IMREAD_COLOR)
+        panoptic_img = cv2.cvtColor(panoptic_img, cv2.COLOR_BGR2RGB)
+
+        # 고유 ID를 계산하기 위해 R, G, B 채널 사용
+        panoptic_id = panoptic_img[:, :, 0].astype(np.uint32) + \
+                    panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
+                    panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
+
+        border_image = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+        instance_seg = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+
+        # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
+        for i, segment_info in enumerate(image_info['segments_info']):
+            segment_id = segment_info['id']
+            category_id = segment_info['category_id']
+            
+            segment_mask = torch.tensor(panoptic_id == segment_id, dtype=torch.float32)
+            segment_mask = F.interpolate(segment_mask.unsqueeze(0).unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0).squeeze(0)
+            segment_mask = torch.where(segment_mask > 0.5, 1, 0)
+            
+            numpy_segment_mask = segment_mask.numpy() 
+            edges = cv2.Canny(numpy_segment_mask.astype(np.uint8), 0, 1)
+            kernel = np.ones((2, 2), np.uint8)
+            edges = cv2.dilate(edges, kernel, iterations=1)
+            edges = torch.tensor(edges, dtype=torch.float32)
+            edges = torch.where(edges > 0.5, 1, 0)
+            border_image = torch.where(edges == 1, 1, border_image)
+            
+            instance_seg = torch.where(segment_mask == 1, category_id / 255, instance_seg)
+        
+        instance_seg = torch.where(border_image == 1, 0, instance_seg)
+        plt.clf()
+        plt.figure(figsize=(12, 12))
+        plt.imshow(instance_seg.squeeze(0).numpy())
+        plt.savefig('/home/wooyung/Develop/RadarDetection/seg.png', bbox_inches='tight')
+        plt.close()
+            
+        # image, border_image = self.random_effect(image, border_image)
+
+        image_mean_brightness = image.mean()
+        image = image - image_mean_brightness + 0.5
+        image = self.normalize(image)
+    
+        return image, instance_seg
+    
+    def __len__(self):
+        return 16
+        if 'train' in self.dataType:
+            return 8192
+        elif 'val' in self.dataType:
+            return 1024
+        return self.length // 4 * 4
+
+    
+    def random_effect(self, image, instance_image):
+        color_jitter = transforms.ColorJitter(brightness=(0.5, 1.5),contrast=(0.5, 1.5),saturation=(0.5, 1.5))
+        image = color_jitter(image)
+        
+        scale = random.uniform(1.0, 1.5)
+        width = int(self.width * scale)
+        height = int(self.width * scale)
+
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        x = random.randint(0, width - self.width)
+        y = random.randint(0, height - self.height)
+        image = image[:, x:x+self.width, y:y+self.height]
+        instance_image = instance_image[:, x:x+self.width, y:y+self.height]
         
         flip_seed = random.randint(0, 3)
         if flip_seed == 0:

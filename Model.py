@@ -126,34 +126,62 @@ class FPN(nn.Module):
 
 
 class CustomDeepLabV3(nn.Module):
-    def __init__(self, width, height, num_classes=64):
+    def __init__(self, num_classes=1):
         super(CustomDeepLabV3, self).__init__()
-        
-        self.width = width
-        self.height = height
 
-        weights = DeepLabV3_ResNet101_Weights.COCO_WITH_VOC_LABELS_V1
-        deeplabv3 = deeplabv3_resnet101(weights=weights)
-        deeplabv3.classifier = DeepLabHead(2048, num_classes)
+        weights = DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1
+        deeplabv3 = deeplabv3_resnet50(weights=weights)
         
         self.encoder = deeplabv3.backbone
-        self.classifier = deeplabv3.classifier
+        
+        self.deconv1 = nn.ConvTranspose2d(2048, 1024, 5, 1, 2)
+        self.bn1 = nn.InstanceNorm2d(1024)
+        self.relu1 = nn.ReLU()
+        
+        self.deconv2 = nn.ConvTranspose2d(1024, 512, 5, 1, 2)
+        self.bn2 = nn.InstanceNorm2d(512)
+        self.relu2 = nn.ReLU()
+        
+        self.deconv3 = nn.ConvTranspose2d(512, 256, 4, 2, 1)
+        self.bn3 = nn.InstanceNorm2d(256)
+        self.relu3 = nn.ReLU()
+        
+        self.deconv4 = nn.ConvTranspose2d(256, 64, 4, 2, 1)
+        self.bn4 = nn.InstanceNorm2d(64)
+        self.relu4 = nn.ReLU()
+        
+        self.end = nn.ConvTranspose2d(64, num_classes, 4, 2, 1)
+        self.tanh = nn.Tanh()
+
         
     def forward(self, x):
-        # batch_size, 64, width, height
-        encoded = self.encoder(x)['out']
-        # batchsize, 2048, width/8, height/8
-        decoded = self.classifier(encoded)
-        # batchsize, num_classes, width/8, height/8
+        x = self.encoder.conv1(x)
+        x = self.encoder.bn1(x)
+        x_conv = self.encoder.relu(x)
+        x_maxpool = self.encoder.maxpool(x_conv)
+        x_layer1 = self.encoder.layer1(x_maxpool)
+        x_layer2 = self.encoder.layer2(x_layer1)
+        x_layer3 = self.encoder.layer3(x_layer2)
+        x_layer4 = self.encoder.layer4(x_layer3)
         
-        if decoded.shape[2:] != (self.width, self.height):
-            seg = F.interpolate(decoded, size=(self.width, self.height), mode="bilinear", align_corners=False)
-        else:
-            seg = decoded
-        # batchsize, num_classes, width, height
-            
-        sig_seg = torch.sigmoid(seg)
-        return sig_seg
+        # print(f'x_layer1: {x_layer1.shape}')
+        # print(f'x_layer2: {x_layer2.shape}')
+        # print(f'x_layer3: {x_layer3.shape}')
+        # print(f'x_layer4: {x_layer4.shape}')
+        
+        '''
+        x_layer1: torch.Size([1, 256, 256, 256])
+        x_layer2: torch.Size([1, 512, 128, 128])
+        x_layer3: torch.Size([1, 1024, 128, 128])
+        x_layer4: torch.Size([1, 2048, 128, 128])
+        '''
+        
+        x_deconv1 = self.relu1(self.bn1(self.deconv1(x_layer4))) + x_layer3
+        x_deconv2 = self.relu2(self.bn2(self.deconv2(x_deconv1))) + x_layer2
+        x_deconv3 = self.relu3(self.bn3(self.deconv3(x_deconv2))) + x_layer1
+        x_deconv4 = self.relu4(self.bn4(self.deconv4(x_deconv3))) + x_conv
+        x_tanh = self.tanh(self.end(x_deconv4)) / 2 + 0.5        
+        return x_tanh
 
 
 
@@ -253,6 +281,27 @@ class SingleChannelSeg(nn.Module):
         
         x['1'] = F.interpolate(x['1'], size=origin_size, mode="bilinear", align_corners=False)
         x['2'] = F.interpolate(x['2'], size=origin_size, mode="bilinear", align_corners=False)
+        
+        # plt.clf()
+        # plt.figure(figsize=(10, 10))
+        # plt.axis('off')
+        # plt.imshow(x['0'][0, 0].detach().cpu().numpy())
+        # plt.savefig("fpn_0.png")
+        # plt.close()
+        
+        # plt.clf()
+        # plt.figure(figsize=(10, 10))
+        # plt.axis('off')
+        # plt.imshow(x['1'][0, 0].detach().cpu().numpy())
+        # plt.savefig("fpn_1.png")
+        # plt.close()
+        
+        # plt.clf()
+        # plt.figure(figsize=(10, 10))
+        # plt.axis('off')
+        # plt.imshow(x['2'][0, 0].detach().cpu().numpy())
+        # plt.savefig("fpn_2.png")
+        # plt.close()
         
         mask = x['0'] + x['1'] + x['2']
         mask = torch.tanh(mask) / 2 + 0.5

@@ -1,3 +1,4 @@
+from turtle import color
 from cv2 import mean
 import torch
 import torch.distributed as dist
@@ -14,13 +15,14 @@ from pycocotools import cocoeval
 import numpy as np
 import sys
 import cv2
+import random
 
 import ImageProcess as ip
 import Model as md
 import CocoDataLoader as ccdl
 import Tele
 
-def loss_each_channel(pred, target, loss_func='iou'):
+def loss_each_channel(pred, target, loss_func):
     if loss_func == 'smooth':
         loss = F.smooth_l1_loss(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'mse':
@@ -32,13 +34,23 @@ def loss_each_channel(pred, target, loss_func='iou'):
         intersection = (pred * target).float().sum(dim=(2, 3))
         union = (pred + target).float().sum(dim=(2, 3))
         iou = intersection / (union + smooth)
-        iou_loss = 1 - iou
+        loss = 1 - iou
+    elif loss_func == 'dice':
+        smooth = 1e-6
+        inverse_pred = 1 - pred
+        inverse_target = 1 - target
+
+        intersection = (inverse_pred * inverse_target).float().sum(dim=(2, 3))
+        union = (inverse_pred + inverse_target).float().sum(dim=(2, 3))
+
+        dice = (2 * intersection + smooth) / (union + smooth)
+        loss = 1 - dice
             
     mean_loss = loss.mean()
     return mean_loss
 
 
-def get_loss(pred, target, loss_func='smooth'):
+def get_loss(pred, target, loss_func='dice'):
     mask_loss = loss_each_channel(pred, target, loss_func)
     return mask_loss
 
@@ -111,9 +123,9 @@ script_path = os.path.abspath(__file__)
 directory = os.path.dirname(script_path)
 os.chdir(directory)
 
-width = 420
-height = 420
-actual_batch_size = 1
+width = 512
+height = 512
+actual_batch_size = 4
 train_plot_points = []
 eval_plot_points = []
 eval_iter = 0
@@ -133,7 +145,7 @@ def main(rank, world_size):
     device = torch.device("cuda", rank)
     map_location = {'cuda:%d' % 0: 'cuda:%d' % rank}
     
-    model = md.SingleChannelSeg().to(device)
+    model = md.CustomDeepLabV3().to(device)
     model_name = model.__class__.__name__
     model_path = f'{directory}/Model/translator_{model_name}.pth'
     
@@ -171,7 +183,7 @@ def main(rank, world_size):
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         # eval_dataset = ccdl.SegDataset(root, width, height, mode='eval')
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
-        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=1, shuffle=True)
+        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=4, shuffle=True)
         
     
     num_epochs = 100000
@@ -186,8 +198,6 @@ def main(rank, world_size):
         train_sampler.set_epoch(epoch)
         
         loss_epoch = 0
-        iou_epoch = 0
-        iou_except_error_epoch = 0
         epoch_start_time = time.time()
         
         for batch_i, batch in enumerate(train_dataloader):
@@ -205,7 +215,7 @@ def main(rank, world_size):
             
             if rank == 0:
                 result = result.detach()
-                ## result = result > 0.5
+                # result = result > 0.5
                 
                 loss_epoch += loss.item()
             
@@ -265,11 +275,16 @@ def main(rank, world_size):
                 plt.savefig(f'{directory}/Train/loss.png', bbox_inches='tight', pad_inches=0)
                 plt.close()
                 
+
                 line_image = result > 0.5
                 line_image = line_image[0][0].cpu().numpy()
                 line_image = line_image.astype(np.uint8)
                 line_image = line_image * 255
-                line_image = cv2.bitwise_not(line_image)
+                
+                # kernel = np.ones((3, 3), np.uint8)
+                # line_image = cv2.morphologyEx(line_image, cv2.MORPH_CLOSE, kernel)
+                
+                # line_image = cv2.bitwise_not(line_image)
                 
                 num_labels, labels_im = cv2.connectedComponents(line_image)
                 # 각 레이블에 대해 이미지 생성
@@ -279,14 +294,20 @@ def main(rank, world_size):
                     channel = np.zeros_like(line_image)
                     channel[mask] = 255  # 도형을 255로 표시하여 명확하게 보이게 함
                     channels.append(channel)
+                    
                 # 결과 확인
                 plt.clf()
                 plt.figure(figsize=(12, 12))
+                segment_image = np.zeros((line_image.shape[0], line_image.shape[1], 3), dtype=np.uint8)
                 for idx, channel in enumerate(channels):
-                    plt.subplot(5, len(channels) // 5 + 1, idx + 1)
-                    plt.axis('off')
-                    plt.imshow(channel)
+                    # kernel = np.ones((3, 3), np.uint8)
+                    # channel = cv2.dilate(channel, kernel, iterations=1)
+                    rgb = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
+                    segment_image[channel == 255] = rgb
+                plt.axis('off')
+                plt.imshow(segment_image)
                 plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)                    
+                plt.close()
                 
                 torch.save(model.state_dict(), f'{directory}/Model/translator_{model_name}.pth')
 
