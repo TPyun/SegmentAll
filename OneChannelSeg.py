@@ -29,6 +29,8 @@ def loss_each_channel(pred, target, loss_func):
         loss = F.mse_loss(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'bce':
         loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'bce_logit':
+        loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'iou':
         smooth = 1e-6
         intersection = (pred * target).float().sum(dim=(2, 3))
@@ -50,7 +52,7 @@ def loss_each_channel(pred, target, loss_func):
     return mean_loss
 
 
-def get_loss(pred, target, loss_func='dice'):
+def get_loss(pred, target, loss_func='bce_logit'):
     mask_loss = loss_each_channel(pred, target, loss_func)
     return mask_loss
 
@@ -276,7 +278,7 @@ def main(rank, world_size):
                 plt.close()
                 
 
-                line_image = result > 0.5
+                line_image = result > 0.9
                 line_image = line_image[0][0].cpu().numpy()
                 line_image = line_image.astype(np.uint8)
                 line_image = line_image * 255

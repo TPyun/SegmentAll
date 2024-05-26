@@ -20,7 +20,7 @@ import Tele
 
 telegram = Tele.TeleSender()
 
-def loss_each_channel(pred, target, loss_func='bce'):
+def loss_each_channel(pred, target, loss_func):
     pred_mask_sum = pred.sum(dim=(2, 3)) + 1
     # target_mask_sum = target.sum(dim=(2, 3)) + 1
     # mean_mask_sum = (pred_mask_sum + target_mask_sum) / 2
@@ -32,6 +32,8 @@ def loss_each_channel(pred, target, loss_func='bce'):
         loss = F.mse_loss(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'bce':
         loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
+    elif loss_func == 'bce_logit':
+        loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'iou':
         smooth = 1e-6
         intersection = (pred * target).float().sum(dim=(2, 3))
@@ -39,12 +41,10 @@ def loss_each_channel(pred, target, loss_func='bce'):
         iou = intersection / (union + smooth)
         iou_loss = 1 - iou
             
-        loss = loss * offset * iou_loss
-    
     mean_loss = loss.mean()
     return mean_loss
 
-def channel_sum_loss(pred, loss_func='smooth'):
+def channel_sum_loss(pred, loss_func):
     channel_sums = pred.sum(dim=1)  # 채널 방향으로 합산
     channel_sums = channel_sums.unsqueeze(1)
     target_sums = torch.ones_like(channel_sums)
@@ -63,7 +63,7 @@ def channel_sum_loss(pred, loss_func='smooth'):
     mean_loss = loss.mean(dim=1).mean()
     return mean_loss
 
-def get_loss(pred, target, loss_func='smooth'):
+def get_loss(pred, target, loss_func='bce_logit'):
     mask_loss = loss_each_channel(pred, target, loss_func)
     # sum_loss = channel_sum_loss(pred, loss_func)
     # loss = mask_loss + sum_loss
