@@ -807,7 +807,6 @@ class BorderPanopticCocoDataset(Dataset):
         
         self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         
-        
         # JSON 파일 로드
         with open(self.annotation_file, 'r') as f:
             self.panoptic_data = json.load(f)
@@ -847,34 +846,55 @@ class BorderPanopticCocoDataset(Dataset):
                     panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
                     panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
 
-        instance_seg = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+        line_image = torch.zeros((1, self.width, self.height), dtype=torch.float32)
+        
+        if len(image_info['segments_info']) > 63:
+            instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
+        else:
+            instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
 
         # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
         for i, segment_info in enumerate(image_info['segments_info']):
             segment_id = segment_info['id']
             category_id = segment_info['category_id']
             
+            # line seg 만들기
             segment_mask = torch.tensor(panoptic_id == segment_id, dtype=torch.float32)
             segment_mask = F.interpolate(segment_mask.unsqueeze(0).unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0).squeeze(0)
             segment_mask = torch.where(segment_mask > 0.5, 1, 0)
             segment_mask = segment_mask.numpy() 
             
             edges = cv2.Canny(segment_mask.astype(np.uint8), 0, 1)
-            kernel = np.ones((4, 4), np.uint8)
+            kernel = np.ones((2, 2), np.uint8)
             edges = cv2.dilate(edges, kernel, iterations=1)
             
             edges = torch.tensor(edges, dtype=torch.float32)
             edges = torch.where(edges > 0.5, 1, 0)
-            instance_seg = torch.where(edges == 1, 1, instance_seg)
+            line_image = torch.where(edges == 1, 1, line_image)
             
-        # 반전
-        instance_seg = (instance_seg == 0).float()
-
+            # 객체별 seg만들기
+            segment_mask = panoptic_id == segment_id
+            segment_mask = segment_mask.astype(np.float32)
+            mask = torch.tensor(segment_mask, dtype=torch.float32)
+            mask = mask.unsqueeze(0)
+            mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
+            instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
+            
+        line_image = (line_image == 0).float()
+        
+        
+        instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
+        instance_seg = instance_seg[:64]
+        
+        
+        # if 'train' in self.dataType:
+        #     image, line_image = self.random_effect(image, line_image)
+        
         image_mean_brightness = image.mean()
         image = image - image_mean_brightness + 0.5
         image = self.normalize(image)
     
-        return image, instance_seg
+        return image, line_image, instance_seg
     
     def __len__(self):
         # if 'train' in self.dataType:
@@ -884,7 +904,7 @@ class BorderPanopticCocoDataset(Dataset):
         return self.length // 4 * 4
 
     
-    def random_effect(self, image, instance_image):
+    def random_effect(self, image, line_image, seg_image):
         color_jitter = transforms.ColorJitter(brightness=(0.5, 1.5),contrast=(0.5, 1.5),saturation=(0.5, 1.5))
         image = color_jitter(image)
         
@@ -893,26 +913,31 @@ class BorderPanopticCocoDataset(Dataset):
         height = int(self.width * scale)
 
         image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
-        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        line_image = torch.nn.functional.interpolate(line_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        seg_image = torch.nn.functional.interpolate(seg_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
         x = random.randint(0, width - self.width)
         y = random.randint(0, height - self.height)
         image = image[:, x:x+self.width, y:y+self.height]
-        instance_image = instance_image[:, x:x+self.width, y:y+self.height]
+        line_image = line_image[:, x:x+self.width, y:y+self.height]
+        seg_image = seg_image[:, x:x+self.width, y:y+self.height]
         
         flip_seed = random.randint(0, 3)
         if flip_seed == 0:
-            return [image, instance_image]
+            return [image, line_image, seg_image]
         elif flip_seed == 1:
             image = torch.flip(image, [2])
-            instance_image = torch.flip(instance_image, [2])
+            line_image = torch.flip(line_image, [2])
+            seg_image = torch.flip(seg_image, [2])
         elif flip_seed == 2:
             image = torch.flip(image, [1])
-            instance_image = torch.flip(instance_image, [1])
+            line_image = torch.flip(line_image, [1])
+            seg_image = torch.flip(seg_image, [1])
         else:
             image = torch.flip(image, [1, 2])
-            instance_image = torch.flip(instance_image, [1, 2])
+            line_image = torch.flip(line_image, [1, 2])
+            seg_image = torch.flip(seg_image, [1, 2])
         
-        return image, instance_image
+        return image, line_image, seg_image
 
 
 class BorderPreProcessedMapillaryDataset(Dataset):
@@ -1072,7 +1097,7 @@ class OneMaskPanopticCocoDataset(Dataset):
             
             numpy_segment_mask = segment_mask.numpy() 
             edges = cv2.Canny(numpy_segment_mask.astype(np.uint8), 0, 1)
-            kernel = np.ones((2, 2), np.uint8)
+            kernel = np.ones((1, 1), np.uint8)
             edges = cv2.dilate(edges, kernel, iterations=1)
             edges = torch.tensor(edges, dtype=torch.float32)
             edges = torch.where(edges > 0.5, 1, 0)
