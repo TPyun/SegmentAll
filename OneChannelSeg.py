@@ -77,8 +77,6 @@ def loss_each_channel(pred, target, loss_func):
         loss = F.binary_cross_entropy(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'bce_logit':
         loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none').mean(dim=(2, 3))
-    elif loss_func == 'bce_logit':
-        loss = F.binary_cross_entropy_with_logits(pred, target, reduction='none').mean(dim=(2, 3))
     elif loss_func == 'iou':
         smooth = 1e-6
         intersection = (pred * target).float().sum(dim=(2, 3))
@@ -99,8 +97,48 @@ def loss_each_channel(pred, target, loss_func):
     mean_loss = loss.mean()
     return mean_loss
 
+def get_iou(pred, target):
+    pred = pred > 0.5
+    target = target > 0.5
+    
+    total_iou = []
+    total_except_error_iou = []
+    for b in range(pred.shape[0]):
+        batch_iou = []
+        batch_except_error_iou = []
+        
+        for c in range(pred.shape[1]):
+            intersection = (pred[b, c] & target[b, c]).float().sum()
+            union = (pred[b, c] | target[b, c]).float().sum()
+            # 둘다 0인 경우는 제외
+            if union == 0:
+                continue
+            iou = intersection / union
+            batch_iou.append(iou)
+            
+            if target[b, c].sum() == 0:
+                continue
+            batch_except_error_iou.append(iou)
+            
+        if len(batch_iou) == 0:
+            continue
+        total_iou.append(sum(batch_iou) / len(batch_iou))
+        if len(batch_except_error_iou) == 0:
+            continue
+        total_except_error_iou.append(sum(batch_except_error_iou) / len(batch_except_error_iou))
+        
+    if len(total_iou) == 0:
+        a = torch.tensor(0.0)
+    else:
+        a = sum(total_iou) / len(total_iou)
+    if len(total_except_error_iou) == 0:
+        b = torch.tensor(0.0)
+    else:
+        b = sum(total_except_error_iou) / len(total_except_error_iou)
+        
+    return a, b
 
-def get_loss(pred, target, loss_func='dice'):
+def get_loss(pred, target, loss_func='smooth'):
     mask_loss = loss_each_channel(pred, target, loss_func)
     return mask_loss
 
@@ -357,112 +395,137 @@ def main(rank, world_size):
                 image = batch[0].to(device)
                 line_image = batch[1].to(device)
 
-            # 객체 탐지 모델 학습
-            result = ddp_model(image)
-            
-            loss = get_loss(result, seg_image)
-            loss.backward()
-            
-            optimizer.step()
-            optimizer.zero_grad()
-            
-            if rank == 0:
-                result = result.detach()
-                # result = result > 0.5
+                # 객체 탐지 모델 학습
+                result = ddp_model(image)
                 
-                loss_epoch += loss.item()
-            
-                progress = (batch_i + 1) / len(train_dataloader)
-                bar_length = 50
-                bar = "#" * int(bar_length * progress) + "-" * (bar_length - int(bar_length * progress))
+                loss = get_loss(result, line_image)
+                loss.backward()
                 
-                elapsed_time = time.time() - epoch_start_time
-                epoch_time_estimate = elapsed_time / (batch_i + 1) * len(train_dataloader)
-                formatted_time = time.strftime("%H:%M:%S", time.gmtime(epoch_time_estimate))
+                optimizer.step()
+                optimizer.zero_grad()
                 
-                sys.stdout.write(f'\r[{bar}] {progress * 100:.2f}% Loss:{loss.item():.4f} ET:{formatted_time}')
-                sys.stdout.flush()
-                
-        # scheduler.step(iou_epoch)
-            
-        loss_epoch /= len(train_dataloader)
-        t_loss_epoch += loss_epoch
-        
-        if (epoch + 1) % print_every == 0:
-            if rank == 0:
-                print()
-                print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", end='| ')
-                print(f"epoch: {epoch}", end='| ')
-                print(f"loss: {t_loss_epoch / print_every:.8f}", end='| ')
-                print()
-                train_plot_points.append([epoch, t_loss_epoch / print_every])
-                
-            t_loss_epoch = 0
-            
-            if rank == 0:
-                plt.clf()
-                plt.figure(figsize=(12, 12))
-                for i in range(3):
-                    try:
-                        plt.subplot(4, 3, 3 * i + 1)
-                        plt.subplots_adjust(wspace=0, hspace=0)
-                        plt.axis('off')
-                        plt.imshow(np.clip(image[i].permute(1, 2, 0).cpu().numpy(), 0, 1))
-                        plt.subplot(4, 3, 3 * i + 2)
-                        plt.subplots_adjust(wspace=0, hspace=0)
-                        plt.axis('off')
-                        plt.imshow(result[i].permute(1, 2, 0).cpu().numpy()) 
-                        plt.subplot(4, 3, 3 * i + 3)
-                        plt.subplots_adjust(wspace=0, hspace=0)
-                        plt.axis('off')
-                        plt.imshow(seg_image[i].permute(1, 2, 0).cpu().numpy())
-                    except Exception as e:
-                        break
-                plt.savefig(f'{directory}/Train/instance.png', bbox_inches='tight', pad_inches=0)
-                plt.close()
-                
-                plt.clf()
-                plt.figure(figsize=(12, 12))
-                for point in train_plot_points:
-                    plt.plot(point[0], point[1], 'ro')
-                plt.savefig(f'{directory}/Train/loss.png', bbox_inches='tight', pad_inches=0)
-                plt.close()
-                
-
-                line_image = result > 0.5
-                line_image = line_image[0][0].cpu().numpy()
-                line_image = line_image.astype(np.uint8)
-                line_image = line_image * 255
-                
-                # kernel = np.ones((3, 3), np.uint8)
-                # line_image = cv2.morphologyEx(line_image, cv2.MORPH_CLOSE, kernel)
-                
-                # line_image = cv2.bitwise_not(line_image)
-                
-                num_labels, labels_im = cv2.connectedComponents(line_image)
-                # 각 레이블에 대해 이미지 생성
-                channels = []
-                for label in range(1, num_labels):  # 배경(레이블 0)은 무시
-                    mask = labels_im == label
-                    channel = np.zeros_like(line_image)
-                    channel[mask] = 255  # 도형을 255로 표시하여 명확하게 보이게 함
-                    channels.append(channel)
+                if rank == 0:
+                    result = result.detach()
+                    # result = result > 0.5
                     
-                # 결과 확인
-                plt.clf()
-                plt.figure(figsize=(12, 12))
-                segment_image = np.zeros((line_image.shape[0], line_image.shape[1], 3), dtype=np.uint8)
-                for idx, channel in enumerate(channels):
-                    # kernel = np.ones((3, 3), np.uint8)
-                    # channel = cv2.dilate(channel, kernel, iterations=1)
-                    rgb = [random.randint(0, 255), random.randint(0, 255), random.randint(0, 255)]
-                    segment_image[channel == 255] = rgb
-                plt.axis('off')
-                plt.imshow(segment_image)
-                plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)                    
-                plt.close()
+                    loss_epoch += loss.item()
+                    
+                    # seg_image = batch[2]
+                    # multi_channel_result = split_channels(result[0][0]).unsqueeze(0).to(device)
+                    # re_seg_image = rearrange_target_image(multi_channel_result, seg_image)
+                    # iou, except_error_iou = get_iou(multi_channel_result, re_seg_image)
+                    iou, except_error_iou = torch.tensor(0.0), torch.tensor(0.0)
+                    
+                    
+                    
+                    # plt.clf()
+                    # plt.imshow(ip.classes_to_rand_rgb(multi_channel_result[0]).detach().permute(1, 2, 0).cpu().numpy())
+                    # plt.axis('off')
+                    # plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)
+                    # plt.close()
+                    
+                    # plt.clf()
+                    # plt.imshow(ip.classes_to_rand_rgb(seg_image[0]).detach().permute(1, 2, 0).cpu().numpy())
+                    # plt.axis('off')
+                    # plt.savefig(f'{directory}/Train/seg_image.png', bbox_inches='tight', pad_inches=0)
+                    # plt.close()
+                    
+                    iou_epoch += iou.item()
+                    except_error_iou_epoch += except_error_iou.item()
+                    
                 
-                torch.save(model.state_dict(), f'{directory}/Model/translator_{model_name}.pth')
+                    progress = (batch_i + 1) / len(train_dataloader)
+                    bar_length = 50
+                    bar = "#" * int(bar_length * progress) + "-" * (bar_length - int(bar_length * progress))
+                    
+                    elapsed_time = time.time() - epoch_start_time
+                    epoch_time_estimate = elapsed_time / (batch_i + 1) * len(train_dataloader)
+                    formatted_time = time.strftime("%H:%M:%S", time.gmtime(epoch_time_estimate))
+                    
+                    sys.stdout.write(f'\r[{bar}] {progress * 100:.2f}% Loss:{loss.item():.4f} ET:{formatted_time}')
+                    sys.stdout.flush()
+                    
+            loss_epoch /= len(train_dataloader)
+            t_loss_epoch += loss_epoch
+            
+            iou_epoch /= len(train_dataloader)
+            t_iou_epoch += iou_epoch
+            
+            except_error_iou_epoch /= len(train_dataloader)
+            t_except_error_iou_epoch += except_error_iou_epoch
+            
+            if (epoch + 1) % print_every == 0:
+                if rank == 0:
+                    print()
+                    print(f"{time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())}", end='| ')
+                    print(f"epoch: {epoch}", end='| ')
+                    print(f"loss: {t_loss_epoch / print_every:.8f}", end='| ')
+                    print(f"IoU: {t_iou_epoch / print_every:.8f}", end='| ')
+                    print(f"EEI: {t_except_error_iou_epoch / print_every:.8f}", end='| ')
+                    print()
+                    train_plot_points.append([epoch, t_loss_epoch / print_every, t_iou_epoch / print_every, t_except_error_iou_epoch / print_every])
+                t_loss_epoch = 0
+                t_iou_epoch = 0
+                t_except_error_iou_epoch = 0
+                
+                if rank == 0:
+                    plt.clf()
+                    plt.figure(figsize=(12, 12))
+                    for i in range(3):
+                        try:
+                            plt.subplot(4, 3, 3 * i + 1)
+                            plt.subplots_adjust(wspace=0, hspace=0)
+                            plt.axis('off')
+                            plt.imshow(np.clip(image[i].permute(1, 2, 0).cpu().numpy(), 0, 1))
+                            plt.subplot(4, 3, 3 * i + 2)
+                            plt.subplots_adjust(wspace=0, hspace=0)
+                            plt.axis('off')
+                            plt.imshow(result[i].permute(1, 2, 0).cpu().numpy()) 
+                            plt.subplot(4, 3, 3 * i + 3)
+                            plt.subplots_adjust(wspace=0, hspace=0)
+                            plt.axis('off')
+                            plt.imshow(line_image[i].permute(1, 2, 0).cpu().numpy())
+                        except Exception as e:
+                            break
+                    plt.savefig(f'{directory}/Train/instance.png', bbox_inches='tight', pad_inches=0)
+                    plt.close()
+                    
+                    plt.clf()
+                    plt.figure(figsize=(12, 12))
+                    for point in train_plot_points:
+                        plt.plot(point[0], point[1], 'ro')
+                    plt.savefig(f'{directory}/Train/loss.png', bbox_inches='tight', pad_inches=0)
+                    plt.close()
+                    
+                    # plt.clf()
+                    # plt.figure(figsize=(12, 12))
+                    # for point in train_plot_points:
+                    #     plt.plot(point[0], point[2], 'ro')
+                    # plt.savefig(f'{directory}/Train/iou.png', bbox_inches='tight', pad_inches=0)
+                    # plt.close()
+                    
+                    # plt.clf()
+                    # plt.figure(figsize=(12, 12))
+                    # for point in train_plot_points:
+                    #     plt.plot(point[0], point[3], 'ro')
+                    # plt.savefig(f'{directory}/Train/except_error_iou.png', bbox_inches='tight', pad_inches=0)
+                    # plt.close()
+                    
+                    multi_channel_result = split_channels(result[0][0]).unsqueeze(0).to(device)
+                    plt.clf()
+                    plt.imshow(ip.classes_to_rand_rgb(multi_channel_result[0]).detach().permute(1, 2, 0).cpu().numpy())
+                    plt.axis('off')
+                    plt.savefig(f'{directory}/Train/instance_mask.png', bbox_inches='tight', pad_inches=0)
+                    plt.close()
+                    
+                    seg_image = batch[2]
+                    plt.clf()
+                    plt.imshow(ip.classes_to_rand_rgb(seg_image[0]).detach().permute(1, 2, 0).cpu().numpy())
+                    plt.axis('off')
+                    plt.savefig(f'{directory}/Train/seg_image.png', bbox_inches='tight', pad_inches=0)
+                    plt.close()
+                    
+                    torch.save(model.state_dict(), f'{directory}/Model/translator_{model_name}.pth')
 
         if (epoch + 1) % eval_every == 0:
             if rank == 0:
