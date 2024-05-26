@@ -173,7 +173,6 @@ def eval(model, eval_dataloader, device):
         
         result = result.detach()
         
-        
         seg_image = rearrange_target_image(result, seg_image)
         
         loss = get_loss(result, seg_image)

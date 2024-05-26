@@ -64,7 +64,7 @@ def classes_to_rand_rgb(image):
     
     # 미리 랜덤 색상을 생성합니다.
     random_colors = torch.rand(channels, 3, dtype=torch.float32, device=image.device)
-
+    
     # 각 채널을 반복하지 않고 벡터화된 연산을 사용하여 rgb 이미지를 생성합니다.
     for i in range(3):  # RGB 채널을 위한 루프
         rgb_image[i] = torch.sum(image[:] * random_colors[:, i][:, None, None], dim=0)
