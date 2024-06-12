@@ -42,14 +42,12 @@ class NewSegDataset(torch.utils.data.Dataset):
             
             # 각각의 case 열기
             for sub_folder in os.listdir(os.path.join(path, folder)):
-                # 여기에 task 0, 1, 2, json 있음
-                # task 0 front camera만 할거임
                 if 'task' not in sub_folder:
                     continue
                 task_json_path = osp.join(path, folder, sub_folder, 'task.json')
                 with open(task_json_path, 'r') as task_json_file:
                     task_json_data = json.load(task_json_file)
-                if task_json_data['name'] != 'FrontCam' and task_json_data['name'] != 'FisheyeCam':
+                if task_json_data['name'] != 'FrontCam': # and task_json_data['name'] != 'FisheyeCam':
                     continue
                 
                 ann_json_name = osp.join(path, folder, sub_folder, 'annotations.json')
@@ -174,7 +172,7 @@ class NewSegDataset(torch.utils.data.Dataset):
             if instance_seg[i].sum() == 0:
                 label_list[i] = torch.zeros(self.num_classes)
                 
-        return image, instance_seg, label_list                
+        return image, instance_seg, label_list           
 
     def random_effect(self, image, instance_image):
         # 색상 조정
@@ -188,26 +186,31 @@ class NewSegDataset(torch.utils.data.Dataset):
             instance_image = torch.flip(instance_image, [2])
         
         # 왜곡효과
-        distortion_scale = random.uniform(0.0, 1.0)
-        startpoints, endpoints = transforms.RandomPerspective.get_params(self.width, self.height, distortion_scale)
+        startpoints = [[0, 0], [255, 0], [255, 255], [0, 255]]
+        gap = self.width // 2
+        endpoints = [[-random.randint(0, gap), -random.randint(0, gap)], \
+            [random.randint(255, 255+gap), -random.randint(0, gap)], \
+                [random.randint(255, 255+gap), random.randint(255, 255+gap)], \
+                    [-random.randint(0, gap), random.randint(255, 255+gap)]]
+        
         image = TF.perspective(image, startpoints, endpoints)
         instance_image = TF.perspective(instance_image, startpoints, endpoints)
         
-        # 스케일 조정
-        scale = random.uniform(1.0, 2.0)
-        width = int(self.width * scale)
-        height = int(self.width * scale)
-        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
-        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
-        x = random.randint(0, width - self.width)
-        y = random.randint(0, height - self.height)
-        image = image[:, x:x+self.width, y:y+self.height]
-        instance_image = instance_image[:, x:x+self.width, y:y+self.height]
+        # # 스케일 조정
+        # scale = random.uniform(1.0, 2.0)
+        # width = int(self.width * scale)
+        # height = int(self.width * scale)
+        # image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        # instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        # x = random.randint(0, width - self.width)
+        # y = random.randint(0, height - self.height)
+        # image = image[:, x:x+self.width, y:y+self.height]
+        # instance_image = instance_image[:, x:x+self.width, y:y+self.height]
         
-        # 0~ 10도 랜덤 rotation
-        random_angle = random.uniform(-20, 20)
-        image = TF.rotate(image, random_angle)
-        instance_image = TF.rotate(instance_image, random_angle)
+        # # 0~ 10도 랜덤 rotation
+        # random_angle = random.uniform(-20, 20)
+        # image = TF.rotate(image, random_angle)
+        # instance_image = TF.rotate(instance_image, random_angle)
         
         return image, instance_image
 
