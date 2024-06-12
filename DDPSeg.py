@@ -376,14 +376,14 @@ def main(rank, world_size):
     
     optimizer = optim.NAdam(ddp_model.parameters(), lr=0.0001)
 
-    # root = f'{directory}/COCO'
-    # train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
+    root = f'{directory}/COCO'
+    train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
     
     # root = f'{directory}/SAMDataset'
     # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
     
-    root = '/home/wooyung/Develop/RadarDetection/20240404/'
-    train_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=True)
+    # root = '/home/wooyung/Develop/RadarDetection/20240404/'
+    # train_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=True)
     
     # root = '/home/wooyung/Develop/RadarDetection/CocoSeg/Mapillary/'
     # train_dataset = ccdl.MapillaryData(root, width, height)
@@ -395,11 +395,11 @@ def main(rank, world_size):
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
     if rank == 0:
-        # eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
+        eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
         # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
-        root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
-        eval_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=False)
+        # root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
+        # eval_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=False)
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
         eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=1, shuffle=True)
         

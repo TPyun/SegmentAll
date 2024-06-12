@@ -25,7 +25,7 @@ from sympy import E
 
 
 class NewSegDataset(torch.utils.data.Dataset):
-    def __init__(self, path, width, height, mode='train', random=False, num_channels=64, num_classes=4):
+    def __init__(self, path, width, height, mode='train', random=False, num_masks=64, num_classes=4):
         self.width = width
         self.height = height
 
@@ -34,7 +34,7 @@ class NewSegDataset(torch.utils.data.Dataset):
         self.data_list = []
         
         self.num_classes = num_classes
-        self.num_channels = num_channels
+        self.num_masks = num_masks
 
         for folder in os.listdir(path):
             if not os.path.isdir(os.path.join(path, folder)):
@@ -126,8 +126,8 @@ class NewSegDataset(torch.utils.data.Dataset):
         with open(ann_json_path, 'r') as ann_json_file:
             ann_json_data = json.load(ann_json_file)
             
-        instance_seg = torch.zeros((self.num_channels, self.width, self.height), dtype=torch.float32)
-        label_list = torch.zeros((self.num_channels, self.num_classes), dtype=torch.float32)
+        instance_seg = torch.zeros((self.num_masks, self.width, self.height), dtype=torch.float32)
+        label_list = torch.zeros((self.num_masks, self.num_classes), dtype=torch.float32)
         background = torch.ones((self.width, self.height), dtype=torch.float32)
         
         for main_data in ann_json_data:
@@ -168,7 +168,7 @@ class NewSegDataset(torch.utils.data.Dataset):
         if self.random == True:
             image, instance_seg = self.random_effect(image, instance_seg)
             
-        for i in range(self.num_channels):
+        for i in range(self.num_masks):
             if instance_seg[i].sum() == 0:
                 label_list[i] = torch.zeros(self.num_classes)
                 
@@ -560,7 +560,7 @@ class InstanceCocoDataset(Dataset):
     
     
 class PanopticCocoDataset(Dataset):
-    def __init__(self, root, dataType, width, height):
+    def __init__(self, root, dataType, width, height, num_masks=64, num_classes=210):
         self.root = root
         self.dataType = dataType
         self.image_folder = '{}/{}'.format(self.root, dataType)
@@ -572,8 +572,8 @@ class PanopticCocoDataset(Dataset):
         self.width = width
         self.height = height
         
-        self.normalize = Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        
+        self.num_masks = num_masks
+        self.num_classes = num_classes
         
         # JSON 파일 로드
         with open(self.annotation_file, 'r') as f:
@@ -615,36 +615,38 @@ class PanopticCocoDataset(Dataset):
                     panoptic_img[:, :, 1].astype(np.uint32) * 256 + \
                     panoptic_img[:, :, 2].astype(np.uint32) * 256 * 256
         
-        if len(image_info['segments_info']) > 63:
-            instance_seg = torch.zeros((len(image_info['segments_info']), self.width, self.height), dtype=torch.float32)
-        else:
-            instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
+        instance_seg = torch.zeros((self.num_masks, self.width, self.height), dtype=torch.float32)
+        label_list = torch.zeros((self.num_masks, self.num_classes), dtype=torch.float32)
 
         # 고유 ID를 사용하여 객체별 세그멘테이션 정보 추출
         for i, segment_info in enumerate(image_info['segments_info']):
+            if i > 63:
+                break
+            
             segment_id = segment_info['id']
             category_id = segment_info['category_id']
             
+            class_softmax = torch.zeros(self.num_classes)
+            class_softmax[category_id] = 1
+            label_list[i] = class_softmax
+                
             segment_mask = panoptic_id == segment_id
             segment_mask = segment_mask.astype(np.float32)
+            segment_mask = cv2.resize(segment_mask, (self.width, self.height))
             mask = torch.tensor(segment_mask, dtype=torch.float32)
-            mask = mask.unsqueeze(0)
-            mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
             instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
 
-        instance_seg = instance_seg[instance_seg.sum(dim=(1, 2)).argsort(descending=True)]
-        instance_seg = instance_seg[:64]
+        # if 'train' in self.dataType:
+        #     image, instance_seg = self.random_effect(image, instance_seg)
             
-        if 'train' in self.dataType:
-            image, instance_seg = self.random_effect(image, instance_seg)
-            
-        image_mean_brightness = image.mean()
-        image = image - image_mean_brightness + 0.5
-        image = self.normalize(image)
+        for i in range(64):
+            if instance_seg[i].sum() == 0:
+                label_list[i] = torch.zeros(self.num_classes)
     
-        return image, instance_seg
+        return image, instance_seg, label_list
     
     def __len__(self):
+        return 64
         # if 'train' in self.dataType:
         #     return 16000
         # elif 'val' in self.dataType:
