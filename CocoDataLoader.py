@@ -1,5 +1,6 @@
 from hmac import new
 import os
+from turtle import back
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -18,6 +19,198 @@ from torchvision.transforms.functional import resize
 import os.path as osp
 from PIL import ImageFilter
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
+
+from sympy import E
+
+
+class NewSegDataset(torch.utils.data.Dataset):
+    def __init__(self, path, width, height, mode='train', random=False, num_channels=64, num_classes=4):
+        self.width = width
+        self.height = height
+
+        self.mode = mode
+        self.random = random
+        self.data_list = []
+        
+        self.num_classes = num_classes
+        self.num_channels = num_channels
+
+        for folder in os.listdir(path):
+            if not os.path.isdir(os.path.join(path, folder)):
+                continue
+            
+            # 각각의 case 열기
+            for sub_folder in os.listdir(os.path.join(path, folder)):
+                # 여기에 task 0, 1, 2, json 있음
+                # task 0 front camera만 할거임
+                if 'task' not in sub_folder:
+                    continue
+                task_json_path = osp.join(path, folder, sub_folder, 'task.json')
+                with open(task_json_path, 'r') as task_json_file:
+                    task_json_data = json.load(task_json_file)
+                if task_json_data['name'] != 'FrontCam' and task_json_data['name'] != 'FisheyeCam':
+                    continue
+                
+                ann_json_name = osp.join(path, folder, sub_folder, 'annotations.json')
+                for file in os.listdir(os.path.join(path, folder, sub_folder)):
+                    
+                    if 'data' in file:
+                        # 여기서 이미지 목록이랑 사이즈 가져옴
+                        mani_json_name = 'manifest.jsonl'  
+                        
+                        if not os.path.exists(osp.join(path, folder, sub_folder, file, mani_json_name)):
+                            continue
+                        
+                        image_list = []
+                        with open(osp.join(path, folder, sub_folder, file, mani_json_name), 'r') as mani_json_file:
+                            for line in mani_json_file:
+                                mani_json_line = json.loads(line)
+                                try:
+                                    # print(osp.join(path, folder, sub_folder, file, mani_json_line['name'] + ".jpg"))
+                                    image_list.append(osp.join(path, folder, sub_folder, file, mani_json_line['name'] + ".jpg"))
+                                except Exception as e:
+                                    continue
+                                
+                        anno_dict = {ann_json_name: image_list}
+                        self.data_list.append(anno_dict)
+
+        num_cases = len(self.data_list)
+        
+        if mode == 'train':
+            self.data_list = self.data_list[:int(num_cases * 0.9)]
+        elif mode == 'test':
+            self.data_list = self.data_list[int(num_cases * 0.1):]
+        else:
+            raise ValueError("Invalid mode")
+        
+        self.num_images = 0
+        for case in self.data_list:
+            for key in case.keys():
+                self.num_images += len(case[key])
+        print(f"Number of cases: {num_cases}, Number of images: {self.num_images}")
+        
+        
+    def __len__(self):
+        return self.num_images
+
+    def get_label_id(self, label):
+        if label == 'Wall':
+            return 1
+        elif label == 'Pedestrian':
+            return 2
+        elif label == 'Vehicle':
+            return 3
+        else:
+            print(f"Invalid label: {label}")
+            
+    def __getitem__(self, index):
+        case_idx = 0
+        image_idx = 0
+        for case in self.data_list:
+            for key in case.keys():
+                if image_idx + len(case[key]) > index:
+                    break
+                image_idx += len(case[key])
+                case_idx += 1
+            if image_idx + len(case[key]) > index:
+                break
+        image_idx = index - image_idx
+        
+        ann_json_path = key
+        image_path = case[key][image_idx]
+        
+        image = Image.open(image_path)
+        original_image_size = image.size
+        image = image.resize((self.width, self.height))
+        image = transforms.ToTensor()(image)
+        
+        with open(ann_json_path, 'r') as ann_json_file:
+            ann_json_data = json.load(ann_json_file)
+            
+        instance_seg = torch.zeros((self.num_channels, self.width, self.height), dtype=torch.float32)
+        label_list = torch.zeros((self.num_channels, self.num_classes), dtype=torch.float32)
+        background = torch.ones((self.width, self.height), dtype=torch.float32)
+        
+        for main_data in ann_json_data:
+            mask_iter = 1
+            for sub_data in main_data['shapes']:
+                if sub_data['frame'] != image_idx:
+                    continue
+                
+                # mask의 클래스
+                label = sub_data['label']
+                class_softmax = torch.zeros(self.num_classes)
+                class_softmax[self.get_label_id(label)] = 1
+                label_list[mask_iter] = class_softmax
+                
+                # 포인트 xy변환하고 세그 이미지에 넣기
+                points = sub_data['points']
+                processed_point = []
+                for x, y in zip(points[::2], points[1::2]):
+                    processed_point.append([x, y])
+                    
+                processed_point = np.array(processed_point, np.int32)
+                
+                # 해당 라벨에 대한 채널만을 위한 마스크 생성
+                mask = np.zeros((original_image_size[1], original_image_size[0]), np.uint8)
+                cv2.fillPoly(mask, [processed_point], (1))
+                mask = cv2.resize(mask, (self.width, self.height))
+                
+                instance_seg[mask_iter] = torch.where(torch.tensor(mask, dtype=torch.float32) == 1, 1, instance_seg[mask_iter])
+                mask_iter += 1
+                
+                background[mask == 1] = 0
+        
+        instance_seg[0] = background
+        class_softmax = torch.zeros(self.num_classes)
+        class_softmax[0] = 1
+        label_list[0] = class_softmax
+        
+        if self.random == True:
+            image, instance_seg = self.random_effect(image, instance_seg)
+            
+        for i in range(self.num_channels):
+            if instance_seg[i].sum() == 0:
+                label_list[i] = torch.zeros(self.num_classes)
+                
+        return image, instance_seg, label_list                
+
+    def random_effect(self, image, instance_image):
+        # 색상 조정
+        color_jitter = transforms.ColorJitter(brightness=(0.1, 2.0),contrast=(0.1, 2.0),saturation=(0.1, 2.0))
+        image = color_jitter(image)
+        
+        # 랜덤으로 좌우 반전
+        random_direction = random.randint(0, 1)
+        if random_direction == 1:
+            image = torch.flip(image, [2])
+            instance_image = torch.flip(instance_image, [2])
+        
+        # 왜곡효과
+        distortion_scale = random.uniform(0.0, 1.0)
+        startpoints, endpoints = transforms.RandomPerspective.get_params(self.width, self.height, distortion_scale)
+        image = TF.perspective(image, startpoints, endpoints)
+        instance_image = TF.perspective(instance_image, startpoints, endpoints)
+        
+        # 스케일 조정
+        scale = random.uniform(1.0, 2.0)
+        width = int(self.width * scale)
+        height = int(self.width * scale)
+        image = torch.nn.functional.interpolate(image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        instance_image = torch.nn.functional.interpolate(instance_image.unsqueeze(0), size=(width, height), mode='bilinear', align_corners=True).squeeze(0)
+        x = random.randint(0, width - self.width)
+        y = random.randint(0, height - self.height)
+        image = image[:, x:x+self.width, y:y+self.height]
+        instance_image = instance_image[:, x:x+self.width, y:y+self.height]
+        
+        # 0~ 10도 랜덤 rotation
+        random_angle = random.uniform(-20, 20)
+        image = TF.rotate(image, random_angle)
+        instance_image = TF.rotate(instance_image, random_angle)
+        
+        return image, instance_image
+
 
 class SegDataset(torch.utils.data.Dataset):
     def __init__(self, path, width, height, mode='train'):

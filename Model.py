@@ -185,12 +185,23 @@ class CustomDeepLabV3(nn.Module):
 
 
 
-import matplotlib.pyplot as plt
-
+class ConvDownsample(nn.Module):
+    def __init__(self, in_channels, out_channels):
+        super(ConvDownsample, self).__init__()
+        self.conv = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=8, stride=4, padding=2),
+            nn.InstanceNorm2d(out_channels),
+            nn.ReLU(inplace=True)
+        )
+    
+    def forward(self, x):
+        return self.conv(x)
+    
 class SimpleSegmentationModel(nn.Module):
-    def __init__(self, num_classes=64):
+    def __init__(self, num_masks=64, num_classes=4):
         super(SimpleSegmentationModel, self).__init__()
-        
+        self.num_masks = num_masks
+        self.num_classes = num_classes
         weights = DeepLabV3_ResNet50_Weights.COCO_WITH_VOC_LABELS_V1
         deeplabv3 = deeplabv3_resnet50(weights=weights)
         
@@ -198,10 +209,28 @@ class SimpleSegmentationModel(nn.Module):
         self.encoder.conv1 = nn.Conv2d(3, 64, kernel_size=7, stride=1, padding=3, bias=False)
         
         in_channels = [256, 512, 2048]
-        self.fpn = FeaturePyramidNetwork(in_channels_list=in_channels, out_channels=num_classes)
+        self.fpn = FeaturePyramidNetwork(in_channels_list=in_channels, out_channels=num_masks)
+        
+        self.decoder = nn.Sequential(
+            nn.Conv2d(num_masks * 3, num_masks, kernel_size=1),
+        )
+        
+        self.avgpool_64 = nn.AdaptiveAvgPool2d((64, 64))
+        self.downsample = nn.Sequential(
+            ConvDownsample(num_masks * 3, 512),
+            ConvDownsample(512, 1024)
+        )
+        self.avgpool_1 = nn.AdaptiveAvgPool2d((1, 1))
+        self.classifier_head = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(1024, 512),
+            nn.ReLU(inplace=True),
+            nn.Linear(512, num_masks * num_classes)
+        )
         
     def forward(self, x):
         origin_size = x.shape[2:]
+        batch_size = x.shape[0]
         
         x = self.encoder.conv1(x)
         x = self.encoder.bn1(x)
@@ -212,43 +241,24 @@ class SimpleSegmentationModel(nn.Module):
         x_3 = self.encoder.layer3(x_2)
         x_3 = self.encoder.layer4(x_3)
         
-        # print(x_1.shape, x_2.shape, x_3.shape)
-        x = self.fpn({'0': x_1, '1': x_2, '2': x_3})
+        fpn_out = self.fpn({'0': x_1, '1': x_2, '2': x_3})
         
-        x['1'] = F.interpolate(x['1'], size=origin_size, mode="bilinear", align_corners=False)
-        x['2'] = F.interpolate(x['2'], size=origin_size, mode="bilinear", align_corners=False)
+        x_1_up = F.interpolate(fpn_out['0'], size=origin_size, mode="bilinear", align_corners=False)
+        x_2_up = F.interpolate(fpn_out['1'], size=origin_size, mode="bilinear", align_corners=False)
+        x_3_up = F.interpolate(fpn_out['2'], size=origin_size, mode="bilinear", align_corners=False)
         
-        
-        # plt.clf()
-        # plt.figure(figsize=(10, 10))
-        # for channel in range(64):
-        #     plt.subplot(8, 8, channel+1)
-        #     plt.axis('off')
-        #     plt.imshow(x['0'][0, channel].detach().cpu().numpy() > 0.5)
-        # plt.savefig("fpn_0.png")
-        # plt.close()
-        
-        # plt.clf()
-        # plt.figure(figsize=(10, 10))
-        # for channel in range(64):
-        #     plt.subplot(8, 8, channel+1)
-        #     plt.axis('off')
-        #     plt.imshow(x['1'][0, channel].detach().cpu().numpy() > 0.5)
-        # plt.savefig("fpn_1.png")
-        # plt.close()
-        
-        # plt.clf()
-        # plt.figure(figsize=(10, 10))
-        # for channel in range(64):
-        #     plt.subplot(8, 8, channel+1)
-        #     plt.axis('off')
-        #     plt.imshow(x['2'][0, channel].detach().cpu().numpy() > 0.5)
-        # plt.savefig("fpn_2.png")
-        # plt.close()
-        
-        mask = x['0'] + x['1'] + x['2']
+        fpn_sum = torch.cat([x_1_up, x_2_up, x_3_up], dim=1)
+        mask = self.decoder(fpn_sum)
         mask = torch.tanh(mask) / 2 + 0.5
-        return mask
+        
+        pooled = self.avgpool_64(fpn_sum)
+        downsampled = self.downsample(pooled)
+        pooled = self.avgpool_1(downsampled)
+        class_logits = self.classifier_head(pooled)
+        class_logits = class_logits.view(-1, self.num_masks, self.num_classes)
+        class_probs = F.softmax(class_logits, dim=2)
+
+        return mask, class_probs
 
 
 
