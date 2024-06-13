@@ -487,16 +487,18 @@ class SegDataset(torch.utils.data.Dataset):
 
 class InstanceCocoDataset(Dataset):
     def __init__(self, root, dataType, width, height):
-        
         self.root = root
         self.dataType = dataType
-        annotation = '{}/instance_annotations/instances_new_{}.json'.format(self.root, dataType)
+        annotation = '{}/instance_annotations/instances_{}.json'.format(self.root, dataType)
         self.coco = COCO(annotation)
         self.ids = list(self.coco.imgs.keys())
         self.categories = self.coco.loadCats(self.coco.getCatIds())
         
         self.width = width
         self.height = height
+        
+        self.num_masks = 64
+        self.num_classes = 100
         
         print(f"{dataType} Number of images: {len(self.ids)}")
         
@@ -515,24 +517,31 @@ class InstanceCocoDataset(Dataset):
         img = img / 255.0
         img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img)
         # 타겟 데이터 구성
-        instance_seg = torch.zeros((64, self.width, self.height), dtype=torch.float32)
+        instance_seg = torch.zeros((self.num_masks, self.width, self.height), dtype=torch.float32)
+        label_list = torch.zeros((self.num_masks, self.num_classes), dtype=torch.float32)
         
         for i, ann in enumerate(coco_annotation):
-            mask = coco.annToMask(ann)
-            category = ann['category_id']
-            mask = torch.tensor(mask, dtype=torch.float32) 
-            mask = mask.unsqueeze(0)
-            mask = torch.nn.functional.interpolate(mask.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
-            # 마스크 부분 1로 채우기
-            if i > 63:
+            if i >= self.num_masks:
                 print(f"Over 63: {i}")
                 continue
+            mask = coco.annToMask(ann)
+            mask = cv2.resize(mask, (self.width, self.height))
+            mask = torch.tensor(mask, dtype=torch.float32) 
+            
+            category_id = ann['category_id']
+            class_softmax = torch.zeros(self.num_classes)
+            class_softmax[category_id] = 1
+            label_list[i] = class_softmax
+            
             instance_seg[i] = torch.where(mask == 1, 1, instance_seg[i])
 
-        if 'train' in self.dataType:
-            img, instance_seg = self.random_effect(img, instance_seg)
+        # if 'train' in self.dataType:
+        #     img, instance_seg = self.random_effect(img, instance_seg)
+        for i in range(64):
+            if instance_seg[i].sum() == 0:
+                label_list[i] = torch.zeros(self.num_classes)
         
-        return img, instance_seg
+        return img, instance_seg, label_list
 
     def __len__(self):
         # max = 512
@@ -561,11 +570,12 @@ class InstanceCocoDataset(Dataset):
     
 class PanopticCocoDataset(Dataset):
     def __init__(self, root, dataType, width, height, num_masks=64, num_classes=210):
+        
         self.root = root
         self.dataType = dataType
         self.image_folder = '{}/{}'.format(self.root, dataType)
         self.annotation_file = '{}/panoptic_annotations/panoptic_{}.json'.format(self.root, dataType)
-        self.panoptic_image_folder = '{}/panoptic_annotations/panoptic_{}/'.format(self.root, dataType)
+        self.panoptic_image_folder = '{}/{}/'.format(self.root, dataType)
         self.image_list = os.listdir(self.image_folder)
         self.image_list.sort()
         
@@ -646,7 +656,6 @@ class PanopticCocoDataset(Dataset):
         return image, instance_seg, label_list
     
     def __len__(self):
-        return 64
         # if 'train' in self.dataType:
         #     return 16000
         # elif 'val' in self.dataType:

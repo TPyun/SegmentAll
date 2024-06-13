@@ -527,9 +527,9 @@ def main(rank, world_size):
                     
                     torch.save(model.state_dict(), f'{directory}/Model/translator_{model_name}.pth')
 
-        if (epoch + 1) % eval_every == 0:
-            if rank == 0:
-                eval(model, eval_dataloader, device)
+        # if (epoch + 1) % eval_every == 0:
+        #     if rank == 0:
+        #         eval(model, eval_dataloader, device)
                 
     cleanup()
     
