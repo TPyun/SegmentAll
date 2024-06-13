@@ -350,7 +350,7 @@ eval_iter = 0
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12356'
     dist.init_process_group("nccl", rank=rank, world_size=world_size)
     print(f"Rank {rank} initialized.")
     
@@ -376,8 +376,8 @@ def main(rank, world_size):
     
     optimizer = optim.NAdam(ddp_model.parameters(), lr=0.0001)
 
-    # root = f'{directory}/COCO'
-    # train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
+    root = f'{directory}/COCO'
+    train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
     
     # root = f'{directory}/SAMDataset'
     # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
@@ -395,7 +395,7 @@ def main(rank, world_size):
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
     if rank == 0:
-        # eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
+        eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
         # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
@@ -555,7 +555,7 @@ def run(demo_fn, world_size):
     
 if __name__ == "__main__":
     os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"]= "0,1"
+    os.environ["CUDA_VISIBLE_DEVICES"]= "1,3,5,6"
     n_gpus = torch.cuda.device_count()
     # assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
     world_size = n_gpus
