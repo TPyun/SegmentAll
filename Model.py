@@ -198,7 +198,7 @@ class ConvDownsample(nn.Module):
         return self.conv(x)
     
 class SimpleSegmentationModel(nn.Module):
-    def __init__(self, num_masks=64, num_classes=210):
+    def __init__(self, num_masks=64, num_classes=4):
         super(SimpleSegmentationModel, self).__init__()
         self.num_masks = num_masks
         self.num_classes = num_classes
