@@ -6,7 +6,13 @@ Ch64_SAMDataset/
 SAMDataset/
 Mapillary/
 MapillaryPanopticSet_256/
-
+Eval sorted/
+Eval not sorted/
+eval_results/
+*.mp4
+*.png
+*.pth
+test.py
 
 
 # Byte-compiled / optimized / DLL files

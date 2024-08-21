@@ -23,9 +23,196 @@ import Model as md
 import CocoDataLoader as ccdl
 import Tele
 from lineDetect import detect_lines
-
+import json
 telegram = Tele.TeleSender()
 
+from pycocotools import mask as mask_util
+from pycocotools.coco import COCO
+from pycocotools.cocoeval import COCOeval
+
+
+# def calculate_f1_score(preds, gts):
+#     # Flatten the tensors to simplify calculation
+#     preds = preds.view(-1)
+#     gts = gts.view(-1)
+    
+#     # True positives, false positives, and false negatives
+#     tp = torch.logical_and(preds == 1, gts == 1).sum().item()
+#     fp = torch.logical_and(preds == 1, gts == 0).sum().item()
+#     fn = torch.logical_and(preds == 0, gts == 1).sum().item()
+    
+#     # Precision and recall
+#     precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+#     recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+    
+#     # F1 score
+#     f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+#     return f1_score
+
+
+import numpy as np
+from sklearn.metrics import f1_score
+
+def calculate_iou(pred_mask, gt_mask):
+    """Calculate Intersection over Union (IoU) for binary masks."""
+    intersection = np.logical_and(pred_mask, gt_mask).sum()
+    union = np.logical_or(pred_mask, gt_mask).sum()
+    if union == 0:
+        return 0
+    return intersection / union
+
+def evaluate_segmentation(pred_mask, gt_mask, pred_class, gt_class):
+    """Calculate IoU and F1 score for instance segmentation across channels."""
+    num_channels = pred_mask.shape[0]
+    ious = []
+    true_labels = []
+    pred_labels = []
+    
+    for i in range(num_channels):
+        # Calculate IoU for the current channel
+        iou = calculate_iou(pred_mask[i], gt_mask[i])
+        ious.append(iou)
+        
+        # Prepare class labels for F1 score calculation
+        # Assuming pred_class and gt_class are binary encoded for each class
+        true_labels.append(np.argmax(gt_class[i]))
+        pred_labels.append(np.argmax(pred_class[i]))
+    
+    # Calculate mean IoU
+    mean_iou = np.mean(ious)
+    
+    # Calculate F1 score
+    f1 = f1_score(true_labels, pred_labels, average='macro')
+    
+    return mean_iou, f1
+
+def mask_to_rle(mask):
+    rle = mask_util.encode(np.asfortranarray(mask.astype(np.uint8)))
+    rle['counts'] = rle['counts'].decode('ascii')
+    return rle
+
+def calculate_area(mask):
+    return int(mask.sum())
+
+def convert_to_coco_format(pred_masks, pred_labels, start_ann_id, img_id, height, width):
+    coco_results = []
+    for j in range(pred_masks.size(0)):  # Number of masks
+        mask = pred_masks[j].cpu().numpy()
+        label = pred_labels[j].argmax().item()  # Assuming the label with the maximum value is the class
+        if mask.sum() == 0:
+            continue
+        rle = mask_to_rle(mask)
+        area = calculate_area(mask)
+        coco_results.append({
+            "image_id": img_id,
+            "category_id": label + 1,  # Adjust if label starts from 0
+            "segmentation": rle,
+            "score": 1.0,  # Assuming binary classification (mask present or not)
+            "id": start_ann_id,
+            "height": height,
+            "width": width,
+            "area": area
+        })
+        start_ann_id += 1
+    return coco_results, start_ann_id
+
+def convert_gt_to_coco_format(seg_images, target_labels, start_ann_id, img_id, height, width):
+    coco_gts = []
+    for j in range(seg_images.size(0)):  # Number of masks
+        mask = seg_images[j].cpu().numpy()
+        label = target_labels[j].argmax().item()  # Assuming the label with the maximum value is the class
+        if mask.sum() == 0:
+            continue
+        rle = mask_to_rle(mask)
+        area = calculate_area(mask)
+        coco_gts.append({
+            "image_id": img_id,
+            "category_id": label + 1,  # Adjust if label starts from 0
+            "segmentation": rle,
+            "iscrowd": 0,  # Adding the iscrowd field
+            "id": start_ann_id,
+            "height": height,
+            "width": width,
+            "area": area
+        })
+        start_ann_id += 1
+    return coco_gts, start_ann_id
+
+def evaluate_model_with_coco_format(model, dataloader, device):
+    model.eval()
+    all_coco_results = []
+    all_coco_gts = []
+    ann_id = 1
+    img_id = 1
+
+    if not os.path.exists('eval_results'):
+        os.makedirs('eval_results')
+    total_inference_time = 0
+    minimum_inference_time = 1000
+    maximum_inference_time = 0
+    with torch.no_grad():
+        for batch in dataloader:
+            images = batch[0].to(device)
+            seg_images = batch[1].to(device)
+            target_labels = batch[2].to(device)
+
+            height, width = images.shape[2], images.shape[3]
+
+            start_time = time.time()
+            result, pred_label = model(images)
+            end_time = time.time()
+            inference_time = end_time - start_time
+            
+            total_inference_time += inference_time
+            if inference_time < minimum_inference_time:
+                minimum_inference_time = inference_time
+            if inference_time > maximum_inference_time:
+                maximum_inference_time = inference_time
+                
+            result = result.detach() > 0.5
+            pred_label = pred_label.detach()
+
+            # Convert predictions and ground truths to COCO format
+            coco_results_batch, ann_id = convert_to_coco_format(result[0], pred_label[0], ann_id, img_id, height, width)
+            coco_gts_batch, ann_id = convert_gt_to_coco_format(seg_images[0], target_labels[0], ann_id, img_id, height, width)
+            
+            all_coco_results.extend(coco_results_batch)
+            all_coco_gts.extend(coco_gts_batch)
+
+            # Save the image with overlaid segmentation
+            draw_instance_segmentation(images[0], result[0], pred_label[0], f'eval_results/{img_id}_pred.png')
+            # draw_instance_segmentation(images[0], seg_images[0], target_labels[0], f'eval_results/{img_id}_gt.png')
+            
+            img_id += 1
+
+    coco_gt = {
+        "images": [{"id": i, "height": height, "width": width} for i in range(1, img_id)],
+        "annotations": all_coco_gts,
+        "categories": [
+            {"id": 1, "name": "Wall"},
+            {"id": 2, "name": "Vehicle"},
+            {"id": 3, "name": "Pedestrian"}
+        ]
+    }
+
+    coco_dt = all_coco_results
+
+    coco_gt_obj = COCO()
+    coco_gt_obj.dataset = coco_gt
+    coco_gt_obj.createIndex()
+
+    coco_dt_obj = coco_gt_obj.loadRes(coco_dt)
+    coco_eval = COCOeval(coco_gt_obj, coco_dt_obj, iouType='segm')
+    coco_eval.params.imgIds = list(range(1, img_id))
+    coco_eval.evaluate()
+    coco_eval.accumulate()
+    coco_eval.summarize()
+    
+    total_inference_time /= len(dataloader)
+    print(f"Total inference time: {total_inference_time:.8f}")
+    print(f"Minimum inference time: {minimum_inference_time:.8f}")
+    print(f"Maximum inference time: {maximum_inference_time:.8f}")
+    
     
 def get_label_name(label_id):
     if label_id == 0:
@@ -199,14 +386,22 @@ def eval(model, eval_dataloader, device):
     total_except_error_iou = 0
     total_loss = 0
     total_inference_time = 0
+    total_f1 = 0
+    
     for batch_i, batch in enumerate(eval_dataloader):
         image = batch[0].to(device)
         seg_image = batch[1].to(device)
         target_label = batch[2].to(device)
+        image_path = batch[3]
 
         start_time = time.time()
         with torch.no_grad():
+            start_time = time.time()
             result, pred_label = model(image)
+            end_time = time.time()
+        inference_time = end_time - start_time
+        print(f"Inference Time: {inference_time:.8f}")
+        
         end_time = time.time()
         inference_time = end_time - start_time
         total_inference_time += inference_time
@@ -222,7 +417,8 @@ def eval(model, eval_dataloader, device):
         result = result > 0.5
         
         iou, except_error_iou = get_iou(result, seg_image)
-
+        
+        
         total_loss += loss.item()
         total_iou += iou.item()
         total_except_error_iou += except_error_iou.item()
@@ -233,20 +429,44 @@ def eval(model, eval_dataloader, device):
         sys.stdout.write(f'\r[{bar}] {progress * 100:.2f}%')
         sys.stdout.flush()
         
+        
+        image_name = image_path[0].split('/')[6:]
+        # 언더바로 이어붙이기
+        image_name = '_'.join(image_name)
+        pred_result = draw_instance_segmentation(image[0], result[0], pred_label[0], f'Eval/instance_{eval_iter}.png')
+        gt_result = draw_instance_segmentation(image[0], seg_image[0], target_label[0], f'Eval/instance_real_{eval_iter}.png')
+        plt.clf()
+        plt.figure(figsize=(18, 6))
+        print(image_name)
+        plt.suptitle(image_name)
+        plt.subplot(1, 3, 1)
+        plt.axis('off')
+        plt.imshow(image[0].permute(1, 2, 0).cpu().numpy())
+        plt.subplot(1, 3, 2)
+        plt.axis('off')
+        plt.imshow(pred_result)
+        plt.subplot(1, 3, 3)
+        plt.axis('off')
+        plt.imshow(gt_result)
+        plt.savefig(f'{directory}/Eval/{image_name}.png', bbox_inches='tight', pad_inches=0)
+        plt.close()
+    
     total_loss /= len(eval_dataloader)
     total_iou /= len(eval_dataloader)
     total_except_error_iou /= len(eval_dataloader)
     total_inference_time /= len(eval_dataloader)
+    total_f1 /= len(eval_dataloader)
     
     print()
     print(f"Eval Loss: {total_loss:.8f}", end='| ')
     print(f"Eval IOU: {total_iou:.8f}", end='| ')
     print(f"Eval Except Error IOU: {total_except_error_iou:.8f}", end='| ')
+    print(f"Eval F1 Score: {total_f1:.8f}", end='| ')
     print(f"Eval Inference Time: {total_inference_time:.8f}")
     print()
     telegram.send_text(f"Eval Loss: {total_loss:.8f} | Eval IOU: {total_iou:.8f} | Eval Except Error IOU: {total_except_error_iou:.8f}")
     eval_plot_points.append([eval_iter, total_loss, total_iou, total_except_error_iou])   
-    
+    exit()
     # plt.clf()
     # plt.figure(figsize=(12, 12))
     # for i in range(3):
@@ -318,24 +538,24 @@ def eval(model, eval_dataloader, device):
     # plt.close()
     
             
-    pred_result = draw_instance_segmentation(image[0], result[0], pred_label[0], f'Eval/instance_{eval_iter}.png')
-    gt_result = draw_instance_segmentation(image[0], seg_image[0], target_label[0], f'Eval/instance_real_{eval_iter}.png')
-    plt.clf()
-    plt.figure(figsize=(18, 6))
-    plt.subplot(1, 3, 1)
-    plt.axis('off')
-    plt.imshow(image[0].permute(1, 2, 0).cpu().numpy())
-    plt.subplot(1, 3, 2)
-    plt.axis('off')
-    plt.imshow(pred_result)
-    plt.subplot(1, 3, 3)
-    plt.axis('off')
-    plt.imshow(gt_result)
-    plt.savefig(f'{directory}/Eval/instance_total.png', bbox_inches='tight', pad_inches=0)
-    plt.close()
+    # pred_result = draw_instance_segmentation(image[0], result[0], pred_label[0], f'Eval/instance_{eval_iter}.png')
+    # gt_result = draw_instance_segmentation(image[0], seg_image[0], target_label[0], f'Eval/instance_real_{eval_iter}.png')
+    # plt.clf()
+    # plt.figure(figsize=(18, 6))
+    # plt.subplot(1, 3, 1)
+    # plt.axis('off')
+    # plt.imshow(image[0].permute(1, 2, 0).cpu().numpy())
+    # plt.subplot(1, 3, 2)
+    # plt.axis('off')
+    # plt.imshow(pred_result)
+    # plt.subplot(1, 3, 3)
+    # plt.axis('off')
+    # plt.imshow(gt_result)
+    # plt.savefig(f'{directory}/Eval/instance_total.png', bbox_inches='tight', pad_inches=0)
+    # plt.close()
     
     model.train()
-    eval_iter += 1     
+    eval_iter += 1
 
 script_path = os.path.abspath(__file__)
 directory = os.path.dirname(script_path)
@@ -376,8 +596,8 @@ def main(rank, world_size):
     
     optimizer = optim.NAdam(ddp_model.parameters(), lr=0.0001)
 
-    root = f'{directory}/COCO'
-    train_dataset = ccdl.PanopticCocoDataset(root, 'train2017', width, height)
+    # root = f'{directory}/COCO'
+    # train_dataset = ccdl.InstanceCocoDataset(root, 'train2017', width, height) 
     
     # root = f'{directory}/SAMDataset'
     # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
@@ -395,19 +615,19 @@ def main(rank, world_size):
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
     if rank == 0:
-        eval_dataset = ccdl.PanopticCocoDataset(root, 'val2017', width, height)
+        # eval_dataset = ccdl.InstanceCocoDataset(root, 'val2017', width, height)
         # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
         # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
-        root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
-        eval_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=False)
+        # root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
+        eval_dataset = ccdl.NewSegDataset(root, width, height, mode='test', random=False)
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
-        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=1, shuffle=True)
+        eval_dataloader = DataLoader(dataset=eval_dataset, batch_size=1, shuffle=False)
         
     
-    num_epochs = 100000
+    num_epochs = 32
     print_every = 1
-    eval_every = 10
-    train = True
+    eval_every = 4
+    train = False
     
     t_loss_epoch = 0
     t_iou_epoch = 0
@@ -546,7 +766,8 @@ def main(rank, world_size):
                     
         if (epoch + 1) % eval_every == 0:
             if rank == 0:
-                eval(model, eval_dataloader, device)
+                # eval(model, eval_dataloader, device)
+                evaluate_model_with_coco_format(model, eval_dataloader, device)
                 
     cleanup()
     
@@ -555,12 +776,210 @@ def run(demo_fn, world_size):
     
 if __name__ == "__main__":
     os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
-    os.environ["CUDA_VISIBLE_DEVICES"]= "1,3,5,6"
+    os.environ["CUDA_VISIBLE_DEVICES"]= "0"
     n_gpus = torch.cuda.device_count()
+    print(n_gpus)
     # assert n_gpus >= 2, f"Requires at least 2 GPUs to run, but got {n_gpus}"
     world_size = n_gpus
     run(main, world_size)
 
 
 
+'''
+sort하고 한거 18에폭
+Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.420 --
+Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.481
+Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.426
+Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.004
+Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.179
+Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.970
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.352
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.525
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.525 -- 
+Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.036
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.304
+Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.981
+IoU=0.50:0.95 | area=   all -- F1 Score: 0.467
 
+Train set: 660 images
+Site1_Scene1_Stop_Case1_Trial4_9m
+Site1_Scene1_Stop_Case1_Trial6_9m
+Site1_Scene1_Stop_Case2_Trial4_9m
+Site1_Scene1_Stop_Case2_Trial5_9m
+Site1_Scene1_Stop_Case2_Trial6_9m
+Site1_Scene1_Stop_Case5_Trial3_9m
+Site1_Scene2_Move_Case1_Trial4
+Site1_Scene2_Move_Case1_Trial5
+Site1_Scene2_Move_Case1_Trial6
+Site1_Scene2_Move_Case1_Trial7
+Site1_Scene2_Move_Case2_Trial4
+Site1_Scene2_Move_Case2_Trial5
+Site1_Scene2_Move_Case2_Trial6
+Site1_Scene2_Move_Case7_Trial1
+Site1_Scene2_Move_Case7_Trial2
+Site1_Scene2_Stop_Case1_Trial4_9m
+Site1_Scene2_Stop_Case1_Trial6_9m
+Site1_Scene2_Stop_Case2_Trial4_9m
+Site1_Scene2_Stop_Case2_Trial5_9m
+Site1_Scene2_Stop_Case3_Trial2_9m
+Site1_Scene4_Move_Case10_Trial2
+Site1_Scene4_Move_Case11_Trial2
+Site1_Scene4_Move_Case1_Trial5
+Site1_Scene4_Move_Case2_Trial2
+Site1_Scene4_Move_Case3_Trial4
+Site1_Scene4_Move_Case5_Trial3
+Site1_Scene4_Move_Case7_Trial5
+Site1_Scene4_Move_Case8_Trial2
+Site1_Scene4_Move_Case9_Trial2
+Site1_Scene4_Stop_Case10_Trial4_9m
+Site1_Scene4_Stop_Case1_Trial6_9m
+Site1_Scene4_Stop_Case2_Trial14_9m
+Site1_Scene4_Stop_Case2_Trial8_9m
+Site1_Scene4_Stop_Case3_Trial14_9m
+Site1_Scene4_Stop_Case3_Trial8_9m
+Site1_Scene4_Stop_Case4_Trial6_9m
+Site1_Scene4_Stop_Case5_Trial6_9m
+Site1_Scene4_Stop_Case7_Trial6_9m
+Site2_Scene1_Move_Case2_Trial5
+Site2_Scene1_Move_Case2_Trial6
+Site2_Scene1_Move_Case2_Trial8
+Site2_Scene1_Move_Case6_Trial2
+Site2_Scene1_Stop_Case2_Trial5_9m
+Site2_Scene1_Stop_Case2_Trial6_9m
+Site2_Scene2_Stop_Case1_Trial4_9m
+Site2_Scene2_Stop_Case1_Trial5_9m
+Site2_Scene2_Stop_Case1_Trial6_9m 
+Site2_Scene2_Stop_Case2_Trial2_9m
+Site2_Scene2_Stop_Case2_Trial6_9m
+Site3_Scene3_Move_Case1_Fast_Trial10
+Site3_Scene3_Move_Case1_Fast_Trial11
+Site3_Scene3_Move_Case1_Fast_Trial12
+Site3_Scene3_Move_Case1_Fast_Trial13
+Site3_Scene3_Move_Case1_Fast_Trial2
+Site3_Scene3_Move_Case1_Fast_Trial3
+Site3_Scene3_Move_Case1_Fast_Trial4
+Site3_Scene3_Move_Case1_Fast_Trial7
+Site3_Scene3_Move_Case1_Fast_Trial8
+Site3_Scene3_Move_Case1_Fast_Trial9
+Site3_Scene3_Move_Case1_Slow_Trial2
+
+Test set: 138 images
+Site3_Scene3_Move_Case1_Slow_Trial3
+Site3_Scene3_Move_Case1_Slow_Trial4
+Site3_Scene3_Move_Case1_Slow_Trial5
+Site3_Scene3_Move_Case1_Slow_Trial8
+Site3_Scene3_Move_Case1_Trial4
+Site3_Scene3_Move_Case1_Trial5
+Site3_Scene3_Move_Case1_Trial6
+Site3_Scene3_Move_Case1_Trial7
+Site3_Scene3_Stop_Case2_Trial10_6m
+Site3_Scene3_Stop_Case2_Trial11_7m
+Site3_Scene3_Stop_Case2_Trial12_7m
+Site3_Scene3_Stop_Case3_Trial10_7m
+Site3_Scene3_Stop_Case3_Trial8_6m
+Site3_Scene3_Stop_Case4_Trial10_7m
+Site3_Scene3_Stop_Case4_Trial12_7m
+Site3_Scene3_Stop_Case4_Trial8_6m
+
+
+
+
+
+
+
+
+sort안한거
+Average Precision  (AP) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.586 --
+Average Precision  (AP) @[ IoU=0.50      | area=   all | maxDets=100 ] = 0.671
+Average Precision  (AP) @[ IoU=0.75      | area=   all | maxDets=100 ] = 0.576
+Average Precision  (AP) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.039
+Average Precision  (AP) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.723
+Average Precision  (AP) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.988
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=  1 ] = 0.477
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets= 10 ] = 0.647
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=   all | maxDets=100 ] = 0.647 --
+Average Recall     (AR) @[ IoU=0.50:0.95 | area= small | maxDets=100 ] = 0.093
+Average Recall     (AR) @[ IoU=0.50:0.95 | area=medium | maxDets=100 ] = 0.835
+Average Recall     (AR) @[ IoU=0.50:0.95 | area= large | maxDets=100 ] = 0.994
+IoU=0.50:0.95 | area=   all -- F1 Score: 0.615
+
+Train set: 648 images
+Site3_Scene3_Stop_Case3_Trial10_7m
+Site3_Scene3_Move_Case1_Fast_Trial7
+Site1_Scene4_Stop_Case2_Trial14_9m
+Site2_Scene2_Stop_Case2_Trial2_9m
+Site1_Scene4_Stop_Case5_Trial6_9m
+Site1_Scene4_Move_Case3_Trial4
+Site1_Scene2_Stop_Case3_Trial2_9m
+Site2_Scene1_Move_Case2_Trial6
+Site1_Scene2_Move_Case2_Trial5
+Site3_Scene3_Stop_Case4_Trial12_7m
+Site1_Scene2_Move_Case1_Trial6
+Site3_Scene3_Move_Case1_Slow_Trial3
+Site1_Scene2_Stop_Case1_Trial6_9m
+Site1_Scene2_Move_Case7_Trial1
+Site3_Scene3_Stop_Case4_Trial8_6m
+Site3_Scene3_Stop_Case3_Trial8_6m
+Site1_Scene2_Move_Case1_Trial7
+Site3_Scene3_Move_Case1_Trial6
+Site3_Scene3_Move_Case1_Fast_Trial4
+Site3_Scene3_Move_Case1_Trial4
+Site3_Scene3_Move_Case1_Fast_Trial2
+Site1_Scene4_Move_Case9_Trial2
+Site3_Scene3_Move_Case1_Fast_Trial10
+Site3_Scene3_Stop_Case4_Trial10_7m
+Site1_Scene4_Move_Case1_Trial5
+Site1_Scene4_Move_Case7_Trial5
+Site3_Scene3_Move_Case1_Fast_Trial9
+Site2_Scene2_Stop_Case2_Trial6_9m
+Site1_Scene2_Move_Case7_Trial2
+Site3_Scene3_Move_Case1_Slow_Trial4
+Site1_Scene4_Stop_Case2_Trial8_9m
+Site3_Scene3_Move_Case1_Slow_Trial8
+Site2_Scene2_Stop_Case1_Trial4_9m
+Site1_Scene4_Move_Case11_Trial2
+Site3_Scene3_Move_Case1_Fast_Trial3
+Site1_Scene4_Move_Case10_Trial2
+Site1_Scene4_Move_Case2_Trial2
+Site2_Scene2_Stop_Case1_Trial5_9m
+Site3_Scene3_Move_Case1_Fast_Trial8
+Site1_Scene1_Stop_Case2_Trial5_9m
+Site1_Scene4_Move_Case5_Trial3
+Site3_Scene3_Move_Case1_Fast_Trial12
+Site1_Scene4_Stop_Case10_Trial4_9m
+Site3_Scene3_Move_Case1_Slow_Trial5
+Site2_Scene2_Stop_Case1_Trial6_9m 
+Site3_Scene3_Stop_Case2_Trial10_6m
+Site3_Scene3_Move_Case1_Slow_Trial2
+Site1_Scene2_Move_Case1_Trial4
+Site2_Scene1_Move_Case2_Trial5
+Site1_Scene4_Stop_Case3_Trial8_9m
+Site3_Scene3_Move_Case1_Fast_Trial11
+Site1_Scene4_Stop_Case1_Trial6_9m
+Site1_Scene4_Stop_Case4_Trial6_9m
+Site1_Scene1_Stop_Case1_Trial6_9m
+Site1_Scene1_Stop_Case2_Trial4_9m
+Site3_Scene3_Move_Case1_Trial5
+Site2_Scene1_Move_Case2_Trial8
+Site3_Scene3_Stop_Case2_Trial11_7m
+Site1_Scene2_Move_Case2_Trial4
+Site1_Scene2_Move_Case2_Trial6
+
+Test set: 150 images
+Site1_Scene4_Stop_Case7_Trial6_9m
+Site1_Scene2_Move_Case1_Trial5
+Site2_Scene1_Move_Case6_Trial2
+Site3_Scene3_Stop_Case2_Trial12_7m
+Site1_Scene1_Stop_Case5_Trial3_9m
+Site3_Scene3_Move_Case1_Fast_Trial13
+Site1_Scene4_Move_Case8_Trial2
+Site1_Scene2_Stop_Case1_Trial4_9m
+Site1_Scene1_Stop_Case2_Trial6_9m
+Site2_Scene1_Stop_Case2_Trial5_9m
+Site1_Scene4_Stop_Case3_Trial14_9m
+Site1_Scene2_Stop_Case2_Trial5_9m
+Site1_Scene2_Stop_Case2_Trial4_9m
+Site1_Scene1_Stop_Case1_Trial4_9m
+Site2_Scene1_Stop_Case2_Trial6_9m
+Site3_Scene3_Move_Case1_Trial7
+'''

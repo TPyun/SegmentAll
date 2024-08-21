@@ -25,7 +25,7 @@ from sympy import E
 
 
 class NewSegDataset(torch.utils.data.Dataset):
-    def __init__(self, path, width, height, mode='train', random=False, num_masks=64, num_classes=4):
+    def __init__(self, path, width, height, mode='train', random=False, num_masks=64, num_classes=64):
         self.width = width
         self.height = height
 
@@ -35,8 +35,11 @@ class NewSegDataset(torch.utils.data.Dataset):
         
         self.num_classes = num_classes
         self.num_masks = num_masks
+        
+        folder_list = os.listdir(path)
+        # folder_list.sort()
 
-        for folder in os.listdir(path):
+        for folder in folder_list:
             if not os.path.isdir(os.path.join(path, folder)):
                 continue
             
@@ -75,12 +78,28 @@ class NewSegDataset(torch.utils.data.Dataset):
 
         num_cases = len(self.data_list)
         
-        # if mode == 'train':
-        #     self.data_list = self.data_list[:int(num_cases * 0.9)]
-        # elif mode == 'test':
-        #     self.data_list = self.data_list[int(num_cases * 0.1):]
-        # else:
-        #     raise ValueError("Invalid mode")
+        # 전체 이미지 개수 구하기
+        total_images = 0
+        for case in self.data_list:
+            for value in case.values():
+                total_images += len(value)
+        print(f"Total number of cases: {num_cases}, Total number of images: {total_images}")
+        
+        if mode == 'train':
+            self.data_list = self.data_list[:int(num_cases * 0.8)]
+            print(f'Train mode: {len(self.data_list)}')
+            for data in self.data_list:
+                for key in data.keys():
+                    print(key)
+                
+        elif mode == 'test':
+            self.data_list = self.data_list[int(num_cases * 0.8):]
+            print(f'Test mode: {len(self.data_list)}')
+            for data in self.data_list:
+                for key in data.keys():
+                    print(key)
+        else:
+            raise ValueError("Invalid mode")
         
         self.num_images = 0
         for case in self.data_list:
@@ -172,7 +191,7 @@ class NewSegDataset(torch.utils.data.Dataset):
             if instance_seg[i].sum() == 0:
                 label_list[i] = torch.zeros(self.num_classes)
                 
-        return image, instance_seg, label_list           
+        return image, instance_seg, label_list, image_path.split('.')[0]       
 
     def random_effect(self, image, instance_image):
         # 색상 조정
@@ -187,8 +206,8 @@ class NewSegDataset(torch.utils.data.Dataset):
         
         # 왜곡효과
         startpoints = [[0, 0], [255, 0], [255, 255], [0, 255]]
-        gap_x = self.width
-        gap_y = self.height
+        gap_x = self.width // 4
+        gap_y = self.height // 4
         endpoints = [[-random.randint(0, gap_x), -random.randint(0, gap_y)], \
             [random.randint(255, 255+gap_x), -random.randint(0, gap_y)], \
                 [random.randint(255, 255+gap_x), random.randint(255, 255+gap_y)], \
@@ -215,7 +234,7 @@ class InstanceCocoDataset(Dataset):
     def __init__(self, root, dataType, width, height):
         self.root = root
         self.dataType = dataType
-        annotation = '{}/instance_annotations/instances_{}.json'.format(self.root, dataType)
+        annotation = '{}/annotations/instances_{}.json'.format(self.root, dataType)
         self.coco = COCO(annotation)
         self.ids = list(self.coco.imgs.keys())
         self.categories = self.coco.loadCats(self.coco.getCatIds())
@@ -241,7 +260,9 @@ class InstanceCocoDataset(Dataset):
         img = img.permute(2, 0, 1)
         img = torch.nn.functional.interpolate(img.unsqueeze(0), size=(self.width, self.height), mode='bilinear', align_corners=True).squeeze(0)
         img = img / 255.0
-        img = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img)
+        # 0~1사이로 정규화
+        img = (img - img.min()) / (img.max() - img.min())    
+        
         # 타겟 데이터 구성
         instance_seg = torch.zeros((self.num_masks, self.width, self.height), dtype=torch.float32)
         label_list = torch.zeros((self.num_masks, self.num_classes), dtype=torch.float32)
@@ -266,7 +287,7 @@ class InstanceCocoDataset(Dataset):
         for i in range(64):
             if instance_seg[i].sum() == 0:
                 label_list[i] = torch.zeros(self.num_classes)
-        
+                
         return img, instance_seg, label_list
 
     def __len__(self):
@@ -829,6 +850,7 @@ class BorderPanopticCocoDataset(Dataset):
         return image, line_image, instance_seg
     
     def __len__(self):
+        return 64
         # if 'train' in self.dataType:
         #     return 8192
         # elif 'val' in self.dataType:

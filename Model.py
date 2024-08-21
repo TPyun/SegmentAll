@@ -135,19 +135,19 @@ class CustomDeepLabV3(nn.Module):
         self.encoder = deeplabv3.backbone
         
         self.deconv1 = nn.ConvTranspose2d(2048, 1024, 5, 1, 2)
-        self.bn1 = nn.InstanceNorm2d(1024)
+        self.bn1 = nn.BatchNorm2d(1024)
         self.relu1 = nn.ReLU()
         
         self.deconv2 = nn.ConvTranspose2d(1024, 512, 5, 1, 2)
-        self.bn2 = nn.InstanceNorm2d(512)
+        self.bn2 = nn.BatchNorm2d(512)
         self.relu2 = nn.ReLU()
         
         self.deconv3 = nn.ConvTranspose2d(512, 256, 4, 2, 1)
-        self.bn3 = nn.InstanceNorm2d(256)
+        self.bn3 = nn.BatchNorm2d(256)
         self.relu3 = nn.ReLU()
         
         self.deconv4 = nn.ConvTranspose2d(256, 64, 4, 2, 1)
-        self.bn4 = nn.InstanceNorm2d(64)
+        self.bn4 = nn.BatchNorm2d(64)
         self.relu4 = nn.ReLU()
         
         self.end = nn.ConvTranspose2d(64, num_classes, 4, 2, 1)
@@ -198,7 +198,7 @@ class ConvDownsample(nn.Module):
         return self.conv(x)
     
 class SimpleSegmentationModel(nn.Module):
-    def __init__(self, num_masks=64, num_classes=210):
+    def __init__(self, num_masks=64, num_classes=64):
         super(SimpleSegmentationModel, self).__init__()
         self.num_masks = num_masks
         self.num_classes = num_classes
