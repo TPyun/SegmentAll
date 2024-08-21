@@ -598,26 +598,16 @@ def main(rank, world_size):
 
     # root = f'{directory}/COCO'
     # train_dataset = ccdl.InstanceCocoDataset(root, 'train2017', width, height) 
-    
-    # root = f'{directory}/SAMDataset'
-    # train_dataset = ccdl.SAMDataset(root, 'train', width, height)
-    
+
+    # 삼성 데이터셋
     root = '/home/wooyung/Develop/RadarDetection/20240404/'
     train_dataset = ccdl.NewSegDataset(root, width, height, mode='train', random=True)
-    
-    # root = '/home/wooyung/Develop/RadarDetection/CocoSeg/Mapillary/'
-    # train_dataset = ccdl.MapillaryData(root, width, height)
-    
-    # root = '/home/wooyung/Develop/RadarDetection/SegmentAll/MapillaryPanopticSet_256/'
-    # train_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='train')
 
     train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
     train_dataloader = DataLoader(dataset=train_dataset, batch_size=actual_batch_size, sampler=train_sampler, pin_memory=True, num_workers=4)
     
     if rank == 0:
         # eval_dataset = ccdl.InstanceCocoDataset(root, 'val2017', width, height)
-        # eval_dataset = ccdl.PreProcessedMapillaryDataset(root, width, height, type='eval')
-        # eval_dataset = ccdl.MapillaryData(root, width, height, 'eval')
         # root = '/home/wooyung/Develop/RadarDetection/Image_Label_5fps/'
         eval_dataset = ccdl.NewSegDataset(root, width, height, mode='test', random=False)
         # eval_dataset = ccdl.SAMDataset(root, 'val', width, height)
@@ -626,8 +616,8 @@ def main(rank, world_size):
     
     num_epochs = 32
     print_every = 1
-    eval_every = 4
-    train = False
+    eval_every = 10000
+    train = True
     
     t_loss_epoch = 0
     t_iou_epoch = 0
